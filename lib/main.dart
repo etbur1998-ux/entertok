@@ -18,6 +18,7 @@ import 'pages/edit_profile_page.dart';
 import 'pages/saved_page.dart';
 import 'pages/help_page.dart';
 import 'pages/group_call_page.dart';
+import 'pages/call_page.dart';
 import 'services/auth_service.dart';
 import 'services/notification_service.dart';
 import 'services/websocket_service.dart';
@@ -27,6 +28,9 @@ final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 /// Global group-call invite listener — started once after login
 StreamSubscription? _globalGroupCallSub;
+
+/// Global 1-to-1 incoming call listener — shows ringing dialog from anywhere
+StreamSubscription? _globalIncomingCallSub;
 
 void startGlobalGroupCallListener() {
   _globalGroupCallSub?.cancel();
@@ -43,7 +47,6 @@ void startGlobalGroupCallListener() {
       '📞 GROUP CALL INVITE received: group=$groupName caller=$callerName',
     );
 
-    // Use the global navigator key — works regardless of current page
     navigatorKey.currentState?.push(
       MaterialPageRoute(
         builder: (_) => GroupCallPage(
@@ -62,6 +65,139 @@ void startGlobalGroupCallListener() {
   });
 }
 
+void startGlobalIncomingCallListener() {
+  _globalIncomingCallSub?.cancel();
+  _globalIncomingCallSub = WebSocketService().onWebRTCOffer.listen((data) {
+    final fromId = (data['from_user_id'] as num?)?.toInt();
+    final fromName = data['from_name']?.toString() ?? 'Someone';
+    final fromAvatar = data['from_avatar']?.toString() ?? '';
+    if (fromId == null) return;
+
+    debugPrint('📲 INCOMING CALL from $fromName (id=$fromId)');
+
+    final ctx = navigatorKey.currentContext;
+    if (ctx == null) return;
+
+    // Check if CallPage is already on top — avoid double dialog
+    final route = ModalRoute.of(ctx);
+    if (route?.settings.name == '/call') return;
+
+    showDialog(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (dialogCtx) => _IncomingCallDialog(
+        callData: data,
+        fromId: fromId,
+        fromName: fromName,
+        fromAvatar: fromAvatar,
+      ),
+    );
+  });
+}
+
+/// Global incoming call dialog widget
+class _IncomingCallDialog extends StatelessWidget {
+  final Map<String, dynamic> callData;
+  final int fromId;
+  final String fromName;
+  final String fromAvatar;
+
+  const _IncomingCallDialog({
+    required this.callData,
+    required this.fromId,
+    required this.fromName,
+    required this.fromAvatar,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: const Color(0xFF1A1A2E),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 8),
+          fromAvatar.isNotEmpty
+              ? CircleAvatar(
+                  radius: 40,
+                  backgroundImage: NetworkImage(fromAvatar),
+                )
+              : CircleAvatar(
+                  radius: 40,
+                  backgroundColor: Colors.deepPurple,
+                  child: Text(
+                    fromName.isNotEmpty ? fromName[0].toUpperCase() : '?',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 32,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+          const SizedBox(height: 16),
+          Text(
+            fromName,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: const [
+              Icon(Icons.call, color: Colors.green, size: 14),
+              SizedBox(width: 6),
+              Text(
+                'Incoming call',
+                style: TextStyle(color: Colors.white54, fontSize: 14),
+              ),
+            ],
+          ),
+        ],
+      ),
+      actionsAlignment: MainAxisAlignment.spaceEvenly,
+      actions: [
+        // Decline
+        TextButton.icon(
+          onPressed: () {
+            Navigator.pop(context);
+            WebSocketService().webrtcHangup(fromId);
+          },
+          icon: const Icon(Icons.call_end, color: Colors.red),
+          label: const Text('Decline', style: TextStyle(color: Colors.red)),
+        ),
+        // Accept
+        ElevatedButton.icon(
+          onPressed: () {
+            Navigator.pop(context);
+            navigatorKey.currentState?.push(
+              MaterialPageRoute(
+                builder: (_) => CallPage(
+                  peerId: fromId,
+                  peerName: fromName,
+                  peerAvatar: fromAvatar.isNotEmpty ? fromAvatar : null,
+                  callType: CallType.audio,
+                  isIncoming: true,
+                  shouldOffer: false,
+                ),
+              ),
+            );
+          },
+          icon: const Icon(Icons.call),
+          label: const Text('Accept'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.green,
+            foregroundColor: Colors.white,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized(); // Required for Windows/Linux/macOS
@@ -72,6 +208,7 @@ void main() async {
     // Start global group call listener after first frame so navigatorKey is attached
     WidgetsBinding.instance.addPostFrameCallback((_) {
       startGlobalGroupCallListener();
+      startGlobalIncomingCallListener();
     });
   }
   runApp(const MyApp());

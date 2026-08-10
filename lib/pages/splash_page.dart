@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import '../main.dart' show startGlobalGroupCallListener;
+import '../main.dart'
+    show startGlobalGroupCallListener, startGlobalIncomingCallListener;
 import '../services/auth_service.dart';
 import '../services/websocket_service.dart';
 
@@ -54,6 +55,7 @@ class _SplashPageState extends State<SplashPage>
         if (token != null) {
           WebSocketService().connect(token);
           startGlobalGroupCallListener();
+          startGlobalIncomingCallListener();
         }
         // Go to home
         if (mounted) {
