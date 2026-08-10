@@ -21,6 +21,7 @@ import 'pages/group_call_page.dart';
 import 'pages/call_page.dart';
 import 'services/auth_service.dart';
 import 'services/notification_service.dart';
+import 'services/push_notification_service.dart';
 import 'services/websocket_service.dart';
 
 /// Global navigator key — lets us push routes from anywhere (e.g. WS listener)
@@ -97,6 +98,20 @@ void startGlobalIncomingCallListener() {
       ),
     );
   });
+}
+
+/// Start all global listeners at once — call after login/auto-login
+Future<void> startAllGlobalListeners() async {
+  final auth = AuthService();
+  final userId = (auth.currentUser?['id'] as num?)?.toInt();
+
+  startGlobalGroupCallListener();
+  startGlobalIncomingCallListener();
+
+  // Init and start push notifications
+  final push = PushNotificationService();
+  await push.init(userId: userId);
+  push.startListening();
 }
 
 /// Global incoming call dialog widget
@@ -216,10 +231,9 @@ void main() async {
   final token = AuthService().apiClient.token;
   if (token != null) {
     WebSocketService().connect(token);
-    // Start global group call listener after first frame so navigatorKey is attached
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      startGlobalGroupCallListener();
-      startGlobalIncomingCallListener();
+    // Start after first frame so navigatorKey is attached
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await startAllGlobalListeners();
     });
   }
   runApp(const MyApp());

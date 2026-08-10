@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../main.dart'
-    show startGlobalGroupCallListener, startGlobalIncomingCallListener;
+import '../main.dart' show startAllGlobalListeners;
 import '../services/auth_service.dart';
 import '../services/websocket_service.dart';
 import 'forgot_password_page.dart';
@@ -318,12 +317,11 @@ class _AuthPageState extends State<AuthPage> {
         // Close loading dialog
         if (mounted) Navigator.of(context).pop();
 
-        // Connect WS + start global group call listener after login
+        // Connect WS + start all global listeners after login
         final token = AuthService().apiClient.token;
         if (token != null) {
           WebSocketService().connect(token);
-          startGlobalGroupCallListener();
-          startGlobalIncomingCallListener();
+          await startAllGlobalListeners();
         }
 
         // Navigate to home
@@ -373,8 +371,7 @@ class _AuthPageState extends State<AuthPage> {
       final token = AuthService().apiClient.token;
       if (token != null) {
         WebSocketService().connect(token);
-        startGlobalGroupCallListener();
-        startGlobalIncomingCallListener();
+        await startAllGlobalListeners();
       }
       if (mounted) {
         Navigator.of(context).pushReplacementNamed('/home');

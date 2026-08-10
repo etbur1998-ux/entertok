@@ -6,6 +6,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   emoji_picker_flutter
   file_selector_windows
   flutter_webrtc
+  local_notifier
   media_kit_libs_windows_video
   media_kit_video
   volume_controller
