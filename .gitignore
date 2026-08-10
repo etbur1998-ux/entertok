@@ -1,0 +1,59 @@
+# Flutter
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.idea/
+.vscode/
+pubspec.lock
+
+# Go backend
+backend/*.exe
+backend/entertok.db
+backend/*.db
+backend/uploads/
+backend/web_app/
+
+# Windows binaries
+*.exe
+
+# Environment / Secrets
+.env
+*.env
+backend/.env
+client_secret.json
+telegram_config.json
+telegram_bot.py
+*.json.bak
+
+# Videos / large media
+*.mp4
+*.avi
+*.mov
+*.mkv
+video.mp4
+
+# Node / Admin
+backend/admin/node_modules/
+backend/admin/dist/
+backend/admin/.env
+
+# Python scripts
+*.py
+cleanup.py
+fix_msg.py
+check.py
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+query
