@@ -78,18 +78,22 @@ void startGlobalIncomingCallListener() {
     final ctx = navigatorKey.currentContext;
     if (ctx == null) return;
 
-    // Check if CallPage is already on top — avoid double dialog
-    final route = ModalRoute.of(ctx);
-    if (route?.settings.name == '/call') return;
+    // Extract the SDP offer so CallPage can use it directly
+    final sdpData = data['data'] as Map<String, dynamic>? ?? {};
+
+    // Detect video vs audio from SDP (if sdp contains 'video' section)
+    final sdpStr = sdpData['sdp']?.toString() ?? '';
+    final isVideo = sdpStr.contains('m=video');
 
     showDialog(
       context: ctx,
       barrierDismissible: false,
       builder: (dialogCtx) => _IncomingCallDialog(
-        callData: data,
+        sdpOffer: sdpData,
         fromId: fromId,
         fromName: fromName,
         fromAvatar: fromAvatar,
+        isVideo: isVideo,
       ),
     );
   });
@@ -97,16 +101,18 @@ void startGlobalIncomingCallListener() {
 
 /// Global incoming call dialog widget
 class _IncomingCallDialog extends StatelessWidget {
-  final Map<String, dynamic> callData;
+  final Map<String, dynamic> sdpOffer;
   final int fromId;
   final String fromName;
   final String fromAvatar;
+  final bool isVideo;
 
   const _IncomingCallDialog({
-    required this.callData,
+    required this.sdpOffer,
     required this.fromId,
     required this.fromName,
     required this.fromAvatar,
+    required this.isVideo,
   });
 
   @override
@@ -147,12 +153,16 @@ class _IncomingCallDialog extends StatelessWidget {
           const SizedBox(height: 6),
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
-            children: const [
-              Icon(Icons.call, color: Colors.green, size: 14),
-              SizedBox(width: 6),
+            children: [
+              Icon(
+                isVideo ? Icons.videocam : Icons.call,
+                color: Colors.green,
+                size: 14,
+              ),
+              const SizedBox(width: 6),
               Text(
-                'Incoming call',
-                style: TextStyle(color: Colors.white54, fontSize: 14),
+                isVideo ? 'Incoming video call' : 'Incoming audio call',
+                style: const TextStyle(color: Colors.white54, fontSize: 14),
               ),
             ],
           ),
@@ -169,7 +179,7 @@ class _IncomingCallDialog extends StatelessWidget {
           icon: const Icon(Icons.call_end, color: Colors.red),
           label: const Text('Decline', style: TextStyle(color: Colors.red)),
         ),
-        // Accept
+        // Accept — pass the sdpOffer so CallPage can answer immediately
         ElevatedButton.icon(
           onPressed: () {
             Navigator.pop(context);
@@ -179,14 +189,15 @@ class _IncomingCallDialog extends StatelessWidget {
                   peerId: fromId,
                   peerName: fromName,
                   peerAvatar: fromAvatar.isNotEmpty ? fromAvatar : null,
-                  callType: CallType.audio,
+                  callType: isVideo ? CallType.video : CallType.audio,
                   isIncoming: true,
                   shouldOffer: false,
+                  initialOffer: sdpOffer, // ← key fix: pre-captured SDP
                 ),
               ),
             );
           },
-          icon: const Icon(Icons.call),
+          icon: Icon(isVideo ? Icons.videocam : Icons.call),
           label: const Text('Accept'),
           style: ElevatedButton.styleFrom(
             backgroundColor: Colors.green,

@@ -18,6 +18,9 @@ class CallPage extends StatefulWidget {
   final CallType callType;
   final bool isIncoming; // true = we received the call
   final bool shouldOffer; // true = we create the SDP offer
+  // Pre-captured SDP offer from global listener — passed so CallPage
+  // doesn't miss the offer that was already received
+  final Map<String, dynamic>? initialOffer;
 
   const CallPage({
     super.key,
@@ -27,6 +30,7 @@ class CallPage extends StatefulWidget {
     required this.callType,
     this.isIncoming = false,
     this.shouldOffer = true,
+    this.initialOffer,
   });
 
   @override
@@ -220,6 +224,21 @@ class _CallPageState extends State<CallPage> {
     await _getMedia();
     await _setupPc();
     if (mounted) setState(() => _state = CallState.connecting);
+
+    // Process the pre-captured offer if it was passed in
+    if (widget.initialOffer != null && widget.initialOffer!.isNotEmpty) {
+      final sdpMap = widget.initialOffer!;
+      await _pc!.setRemoteDescription(
+        RTCSessionDescription(
+          sdpMap['sdp'] as String? ?? '',
+          sdpMap['type'] as String? ?? 'offer',
+        ),
+      );
+      final ans = await _pc!.createAnswer();
+      await _pc!.setLocalDescription(ans);
+      _ws.webrtcSendAnswer(widget.peerId, ans.toMap());
+    }
+    // Otherwise _listenSignals' _subOffer will handle the next offer
   }
 
   // ── End call ───────────────────────────────────────────────────────────────
