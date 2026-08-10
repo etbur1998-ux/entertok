@@ -79,6 +79,10 @@ void startGlobalIncomingCallListener() {
     final ctx = navigatorKey.currentContext;
     if (ctx == null) return;
 
+    // Don't show dialog if CallPage is already on the navigator stack
+    final currentRoute = ModalRoute.of(ctx);
+    if (currentRoute?.settings.name == '/call') return;
+
     // Extract the SDP offer so CallPage can use it directly
     final sdpData = data['data'] as Map<String, dynamic>? ?? {};
 

@@ -92,17 +92,11 @@ class PushNotificationService {
     );
 
     // ── Incoming call ─────────────────────────────────────────────────────
-    _subs.add(
-      ws.onWebRTCOffer.listen((data) {
-        final fromName = data['from_name']?.toString() ?? 'Someone';
-        _show(
-          id: 'call_${data['from_user_id']}',
-          title: '📞 Incoming Call',
-          body: '$fromName is calling you',
-          icon: '📞',
-        );
-      }),
-    );
+    // NOTE: Do NOT subscribe to onWebRTCOffer here.
+    // The global call listener (startGlobalIncomingCallListener) already
+    // handles the dialog AND the SDP offer. Subscribing here would
+    // double-process the offer and break the WebRTC handshake.
+    // The call dialog itself acts as the visual notification.
 
     // ── Group call invite ─────────────────────────────────────────────────
     _subs.add(

@@ -92,6 +92,9 @@ class _CallPageState extends State<CallPage> {
   void _listenSignals() {
     _subOffer = _ws.onWebRTCOffer.listen((data) async {
       if ((data['from_user_id'] as num?)?.toInt() != widget.peerId) return;
+      // If initialOffer was already used in _acceptCall, skip this
+      if (widget.initialOffer != null && widget.initialOffer!.isNotEmpty)
+        return;
       // Accept the offer
       if (_pc == null) {
         await _getMedia();
@@ -221,11 +224,12 @@ class _CallPageState extends State<CallPage> {
   // ── Accept incoming call ───────────────────────────────────────────────────
 
   Future<void> _acceptCall() async {
+    if (_pc != null) return; // already set up — avoid double processing
     await _getMedia();
     await _setupPc();
     if (mounted) setState(() => _state = CallState.connecting);
 
-    // Process the pre-captured offer if it was passed in
+    // Process the pre-captured offer passed from the global listener
     if (widget.initialOffer != null && widget.initialOffer!.isNotEmpty) {
       final sdpMap = widget.initialOffer!;
       await _pc!.setRemoteDescription(
@@ -237,8 +241,10 @@ class _CallPageState extends State<CallPage> {
       final ans = await _pc!.createAnswer();
       await _pc!.setLocalDescription(ans);
       _ws.webrtcSendAnswer(widget.peerId, ans.toMap());
+      debugPrint(
+        'CallPage: answered with initialOffer to peer=${widget.peerId}',
+      );
     }
-    // Otherwise _listenSignals' _subOffer will handle the next offer
   }
 
   // ── End call ───────────────────────────────────────────────────────────────
