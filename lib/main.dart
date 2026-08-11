@@ -19,6 +19,7 @@ import 'pages/saved_page.dart';
 import 'pages/help_page.dart';
 import 'pages/group_call_page.dart';
 import 'pages/call_page.dart';
+import 'pages/meeting_page.dart';
 import 'services/auth_service.dart';
 import 'services/notification_service.dart';
 import 'services/push_notification_service.dart';
@@ -646,6 +647,12 @@ class _ResponsiveHomePageState extends State<ResponsiveHomePage>
             icon: Icon(Icons.search, color: Colors.grey[700]),
             onPressed: _showSearch,
           ),
+          // ── Zoom / Video Meeting button ──────────────────────────────
+          IconButton(
+            icon: Icon(Icons.video_call_rounded, color: Colors.grey[700]),
+            tooltip: 'Meetings',
+            onPressed: () => _push(const MeetingPage()),
+          ),
           Stack(
             children: [
               IconButton(
@@ -826,6 +833,12 @@ class _ResponsiveHomePageState extends State<ResponsiveHomePage>
                   'Live',
                   -1,
                   onTap: () => _push(const LivePage()),
+                ),
+                _desktopNav(
+                  Icons.video_call_rounded,
+                  'Meetings',
+                  -1,
+                  onTap: () => _push(const MeetingPage()),
                 ),
                 const SizedBox(width: 12),
                 Stack(
