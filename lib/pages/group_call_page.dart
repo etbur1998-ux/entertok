@@ -185,7 +185,8 @@ class _GroupCallPageState extends State<GroupCallPage> {
         }
       });
     } catch (e) {
-      debugPrint('GroupCall load members error: $e');
+      // No group in DB (meeting mode) — that's fine, members join via code
+      debugPrint('GroupCall load members: $e (meeting mode — no members)');
     }
   }
 
@@ -708,20 +709,43 @@ class _GroupCallPageState extends State<GroupCallPage> {
             ),
             const SizedBox(height: 8),
             Text(
-              total == 0 ? 'Calling group...' : '$joined / $total joined',
+              total == 0
+                  ? 'Waiting for participants...'
+                  : '$joined / $total joined',
               style: TextStyle(color: Colors.grey[400], fontSize: 15),
             ),
             const SizedBox(height: 12),
             // Animated "ringing" indicator
             const _RingingDots(),
             const SizedBox(height: 32),
-            // Member list with status
+            // Member list or meeting mode message
             Expanded(
               child: _members.isEmpty
                   ? Center(
-                      child: Text(
-                        'Loading members...',
-                        style: TextStyle(color: Colors.grey[500]),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.link, size: 48, color: Colors.grey[600]),
+                          const SizedBox(height: 16),
+                          Text(
+                            'Share the meeting code',
+                            style: TextStyle(
+                              color: Colors.grey[400],
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'so others can join',
+                            style: TextStyle(
+                              color: Colors.grey[600],
+                              fontSize: 13,
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          const _RingingDots(),
+                        ],
                       ),
                     )
                   : ListView.builder(

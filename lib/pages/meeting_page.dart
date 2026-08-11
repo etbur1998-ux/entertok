@@ -148,11 +148,31 @@ class _MeetingPageState extends State<MeetingPage>
   }
 
   // Start alone — show the code, let others join
-  void _startInstant() {
+  void _startInstant() async {
     final code = _genCode();
     final name = '$_myName\'s Meeting';
-    final groupId = DateTime.now().millisecondsSinceEpoch % 99999 + 1;
-    _launchCall(code: code, name: name, groupId: groupId);
+    setState(() => _creatingMeeting = true);
+
+    try {
+      // Create a real group in the DB — even solo, so others can join by code
+      // Use current user's ID + a dummy extra member list (just self)
+      final result = await _msgSvc.createGroup(
+        groupName: name,
+        members: [], // creator is added automatically by backend
+      );
+      final groupId =
+          (result['conversation']?['id'] as num?)?.toInt() ??
+          (result['id'] as num?)?.toInt() ??
+          DateTime.now().millisecondsSinceEpoch % 99999 + 1;
+
+      setState(() => _creatingMeeting = false);
+      _launchCall(code: code, name: name, groupId: groupId);
+    } catch (e) {
+      setState(() => _creatingMeeting = false);
+      // Fallback: use a hash-based ID if group creation fails
+      final groupId = code.replaceAll('-', '').hashCode.abs() % 99999 + 1;
+      _launchCall(code: code, name: name, groupId: groupId);
+    }
   }
 
   // Pick participants first
@@ -396,8 +416,9 @@ class _MeetingPageState extends State<MeetingPage>
                     groupId: groupId,
                     groupName: 'Meeting $code',
                     callType: GroupCallType.video,
-                    isCaller: false,
-                    callerName: 'Meeting Host',
+                    // Join as caller=true so we go straight to active call screen
+                    // without waiting for a group_call_invite
+                    isCaller: true,
                   ),
                 ),
               );
