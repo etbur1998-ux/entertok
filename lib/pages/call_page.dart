@@ -54,6 +54,8 @@ class _CallPageState extends State<CallPage> {
   CallState _state = CallState.connecting;
   bool _micOn = true;
   bool _camOn = true;
+  bool _screenSharing = false; // ← screen share active
+  MediaStream? _screenStream; // ← screen capture stream
   Duration _elapsed = Duration.zero;
   Timer? _timer;
 
@@ -285,12 +287,121 @@ class _CallPageState extends State<CallPage> {
     _localStream?.getVideoTracks().forEach((t) => t.enabled = _camOn);
   }
 
-  void _flipCam() =>
-      _localStream?.getVideoTracks().forEach((t) => Helper.switchCamera(t));
+  // ── Screen sharing ─────────────────────────────────────────────────────────
+  Future<void> _toggleScreenShare() async {
+    if (_screenSharing) {
+      await _stopScreenShare();
+    } else {
+      await _startScreenShare();
+    }
+  }
+
+  Future<void> _startScreenShare() async {
+    try {
+      // getDisplayMedia shows the OS screen/window picker
+      _screenStream = await navigator.mediaDevices.getDisplayMedia({
+        'video': true,
+        'audio': false, // system audio not needed for most cases
+      });
+
+      if (_pc == null || !mounted) return;
+
+      final screenTrack = _screenStream!.getVideoTracks().first;
+
+      // Replace the existing video sender track with the screen track
+      final senders = await _pc!.getSenders();
+      for (final sender in senders) {
+        if (sender.track?.kind == 'video') {
+          await sender.replaceTrack(screenTrack);
+          break;
+        }
+      }
+
+      // Update local preview to show the screen
+      _local.srcObject = _screenStream;
+
+      // When user stops sharing from OS-level (e.g. clicks "Stop sharing")
+      screenTrack.onEnded = () {
+        _stopScreenShare();
+      };
+
+      setState(() {
+        _screenSharing = true;
+        _camOn = false;
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.present_to_all, color: Colors.white),
+                SizedBox(width: 8),
+                Text('Screen sharing started'),
+              ],
+            ),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Screen share error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Screen share failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _stopScreenShare() async {
+    if (_pc == null) return;
+
+    // Stop the screen stream
+    _screenStream?.getTracks().forEach((t) => t.stop());
+    _screenStream?.dispose();
+    _screenStream = null;
+
+    // Restore camera track
+    if (_localStream != null) {
+      final camTrack = _localStream!.getVideoTracks().firstOrNull;
+      if (camTrack != null) {
+        final senders = await _pc!.getSenders();
+        for (final sender in senders) {
+          if (sender.track?.kind == 'video') {
+            await sender.replaceTrack(camTrack);
+            break;
+          }
+        }
+      }
+      // Restore local preview to camera
+      _local.srcObject = _localStream;
+    }
+
+    setState(() {
+      _screenSharing = false;
+      _camOn = widget.callType == CallType.video;
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Screen sharing stopped'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+  }
 
   void _endCall({bool remote = false}) {
     if (!remote) _ws.webrtcHangup(widget.peerId);
     _timer?.cancel();
+    _screenStream?.getTracks().forEach((t) => t.stop());
+    _screenStream?.dispose();
     _pc?.close();
     _localStream?.dispose();
     if (mounted) {
@@ -444,6 +555,39 @@ class _CallPageState extends State<CallPage> {
                             : 'Connecting...',
                         style: TextStyle(color: Colors.grey[400]),
                       ),
+
+                      // Screen sharing banner (shown below the top bar)
+                      if (_screenSharing)
+                        Positioned(
+                          top: 60,
+                          left: 0,
+                          right: 0,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 8,
+                            ),
+                            color: Colors.orange.withOpacity(0.88),
+                            child: const Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.present_to_all,
+                                  color: Colors.white,
+                                  size: 18,
+                                ),
+                                SizedBox(width: 8),
+                                Text(
+                                  'You are sharing your screen',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
                       if (_state == CallState.connecting) ...[
                         const SizedBox(height: 16),
                         _pulseRings(),
@@ -568,11 +712,14 @@ class _CallPageState extends State<CallPage> {
                     onTap: _endCall,
                     child: _roundBtn(Icons.call_end, Colors.red, 64),
                   ),
+                  // ── Screen share ──────────────────────────────
                   _ctrlBtn(
-                    Icons.flip_camera_ios,
-                    Colors.white,
-                    _flipCam,
-                    label: 'Flip',
+                    _screenSharing
+                        ? Icons.stop_screen_share
+                        : Icons.present_to_all,
+                    _screenSharing ? Colors.orange : Colors.white,
+                    _toggleScreenShare,
+                    label: _screenSharing ? 'Stop' : 'Share',
                   ),
                   _ctrlBtn(
                     Icons.volume_up,

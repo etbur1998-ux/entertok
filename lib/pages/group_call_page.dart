@@ -90,6 +90,8 @@ class _GroupCallPageState extends State<GroupCallPage> {
   bool _localReady = false;
   bool _micOn = true;
   bool _camOn = true;
+  bool _screenSharing = false;
+  MediaStream? _screenStream;
 
   // ── Peers (remote) ────────────────────────────────────────────────────────
   final Map<int, _Peer> _peers = {};
@@ -437,6 +439,102 @@ class _GroupCallPageState extends State<GroupCallPage> {
     _localStream?.getVideoTracks().forEach((t) => t.enabled = _camOn);
   }
 
+  // ── Screen sharing ────────────────────────────────────────────────────────
+
+  Future<void> _toggleScreenShare() async {
+    _screenSharing ? await _stopScreenShare() : await _startScreenShare();
+  }
+
+  Future<void> _startScreenShare() async {
+    try {
+      _screenStream = await navigator.mediaDevices.getDisplayMedia({
+        'video': true,
+        'audio': false,
+      });
+      if (!mounted) return;
+
+      final screenTrack = _screenStream!.getVideoTracks().first;
+
+      // Replace video track in ALL peer connections
+      for (final peer in _peers.values) {
+        final senders = await peer.pc?.getSenders() ?? [];
+        for (final s in senders) {
+          if (s.track?.kind == 'video') {
+            await s.replaceTrack(screenTrack);
+            break;
+          }
+        }
+      }
+
+      _local.srcObject = _screenStream;
+      screenTrack.onEnded = () => _stopScreenShare();
+
+      setState(() {
+        _screenSharing = true;
+        _camOn = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.present_to_all, color: Colors.white),
+                SizedBox(width: 8),
+                Text('Screen sharing started'),
+              ],
+            ),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Group screen share error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Screen share failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _stopScreenShare() async {
+    _screenStream?.getTracks().forEach((t) => t.stop());
+    _screenStream?.dispose();
+    _screenStream = null;
+
+    // Restore camera track in all peer connections
+    final camTrack = _localStream?.getVideoTracks().firstOrNull;
+    if (camTrack != null) {
+      for (final peer in _peers.values) {
+        final senders = await peer.pc?.getSenders() ?? [];
+        for (final s in senders) {
+          if (s.track?.kind == 'video') {
+            await s.replaceTrack(camTrack);
+            break;
+          }
+        }
+      }
+    }
+    if (_localStream != null) _local.srcObject = _localStream;
+
+    setState(() {
+      _screenSharing = false;
+      _camOn = widget.callType == GroupCallType.video;
+    });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Screen sharing stopped'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
   @override
   void dispose() {
     _timer?.cancel();
@@ -447,6 +545,8 @@ class _GroupCallPageState extends State<GroupCallPage> {
     _subAnswer?.cancel();
     _subIce?.cancel();
     _subHangup?.cancel();
+    _screenStream?.getTracks().forEach((t) => t.stop());
+    _screenStream?.dispose();
     for (final p in _peers.values) {
       p.dispose();
     }
@@ -760,6 +860,30 @@ class _GroupCallPageState extends State<GroupCallPage> {
         child: Column(
           children: [
             _topBar(),
+            // Screen sharing banner
+            if (_screenSharing)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                color: Colors.orange.withOpacity(0.9),
+                child: const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.present_to_all, color: Colors.white, size: 18),
+                    SizedBox(width: 8),
+                    Text(
+                      'You are sharing your screen',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             Expanded(
               child: widget.callType == GroupCallType.video
                   ? _videoGrid()
@@ -1072,6 +1196,13 @@ class _GroupCallPageState extends State<GroupCallPage> {
           Colors.white,
           _showParticipants,
           label: 'Members',
+        ),
+        // ── Screen share ──────────────────────────────────────
+        _ctrlBtn(
+          _screenSharing ? Icons.stop_screen_share : Icons.present_to_all,
+          _screenSharing ? Colors.orange : Colors.white,
+          _toggleScreenShare,
+          label: _screenSharing ? 'Stop' : 'Share',
         ),
       ],
     ),
