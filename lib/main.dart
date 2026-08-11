@@ -33,6 +33,10 @@ StreamSubscription? _globalGroupCallSub;
 /// Global 1-to-1 incoming call listener — shows ringing dialog from anywhere
 StreamSubscription? _globalIncomingCallSub;
 
+// Tracks the peer ID of an active call — prevents re-showing dialog
+int? _activeCallPeerId;
+DateTime? _lastDialogTime;
+
 void startGlobalGroupCallListener() {
   _globalGroupCallSub?.cancel();
   _globalGroupCallSub = WebSocketService().onGroupCallInvite.listen((data) {
@@ -74,21 +78,25 @@ void startGlobalIncomingCallListener() {
     final fromAvatar = data['from_avatar']?.toString() ?? '';
     if (fromId == null) return;
 
+    // ── Dedup guards ────────────────────────────────────────────────────
+    // 1. Already in an active call with this peer
+    if (_activeCallPeerId == fromId) return;
+    // 2. Dialog shown within last 6 seconds (re-offer / ICE restart)
+    final now = DateTime.now();
+    if (_lastDialogTime != null &&
+        now.difference(_lastDialogTime!).inSeconds < 6)
+      return;
+
     debugPrint('📲 INCOMING CALL from $fromName (id=$fromId)');
 
     final ctx = navigatorKey.currentContext;
     if (ctx == null) return;
 
-    // Don't show dialog if CallPage is already on the navigator stack
-    final currentRoute = ModalRoute.of(ctx);
-    if (currentRoute?.settings.name == '/call') return;
-
-    // Extract the SDP offer so CallPage can use it directly
     final sdpData = data['data'] as Map<String, dynamic>? ?? {};
-
-    // Detect video vs audio from SDP (if sdp contains 'video' section)
     final sdpStr = sdpData['sdp']?.toString() ?? '';
     final isVideo = sdpStr.contains('m=video');
+
+    _lastDialogTime = now;
 
     showDialog(
       context: ctx,
@@ -99,8 +107,21 @@ void startGlobalIncomingCallListener() {
         fromName: fromName,
         fromAvatar: fromAvatar,
         isVideo: isVideo,
+        onAccepted: () => _activeCallPeerId = fromId,
+        onDeclined: () {
+          _activeCallPeerId = null;
+          _lastDialogTime = null;
+        },
       ),
-    );
+    ).then((_) {
+      // Clear active peer 5s after dialog closes (call ended)
+      Future.delayed(const Duration(seconds: 5), () {
+        if (_activeCallPeerId == fromId) {
+          _activeCallPeerId = null;
+          _lastDialogTime = null;
+        }
+      });
+    });
   });
 }
 
@@ -125,6 +146,8 @@ class _IncomingCallDialog extends StatelessWidget {
   final String fromName;
   final String fromAvatar;
   final bool isVideo;
+  final VoidCallback? onAccepted;
+  final VoidCallback? onDeclined;
 
   const _IncomingCallDialog({
     required this.sdpOffer,
@@ -132,6 +155,8 @@ class _IncomingCallDialog extends StatelessWidget {
     required this.fromName,
     required this.fromAvatar,
     required this.isVideo,
+    this.onAccepted,
+    this.onDeclined,
   });
 
   @override
@@ -192,6 +217,7 @@ class _IncomingCallDialog extends StatelessWidget {
         // Decline
         TextButton.icon(
           onPressed: () {
+            onDeclined?.call();
             Navigator.pop(context);
             WebSocketService().webrtcHangup(fromId);
           },
@@ -201,20 +227,27 @@ class _IncomingCallDialog extends StatelessWidget {
         // Accept — pass the sdpOffer so CallPage can answer immediately
         ElevatedButton.icon(
           onPressed: () {
+            onAccepted?.call();
             Navigator.pop(context);
-            navigatorKey.currentState?.push(
-              MaterialPageRoute(
-                builder: (_) => CallPage(
-                  peerId: fromId,
-                  peerName: fromName,
-                  peerAvatar: fromAvatar.isNotEmpty ? fromAvatar : null,
-                  callType: isVideo ? CallType.video : CallType.audio,
-                  isIncoming: true,
-                  shouldOffer: false,
-                  initialOffer: sdpOffer, // ← key fix: pre-captured SDP
-                ),
-              ),
-            );
+            navigatorKey.currentState
+                ?.push(
+                  MaterialPageRoute(
+                    builder: (_) => CallPage(
+                      peerId: fromId,
+                      peerName: fromName,
+                      peerAvatar: fromAvatar.isNotEmpty ? fromAvatar : null,
+                      callType: isVideo ? CallType.video : CallType.audio,
+                      isIncoming: true,
+                      shouldOffer: false,
+                      initialOffer: sdpOffer,
+                    ),
+                  ),
+                )
+                .then((_) {
+                  // Call ended — clear active peer
+                  _activeCallPeerId = null;
+                  _lastDialogTime = null;
+                });
           },
           icon: Icon(isVideo ? Icons.videocam : Icons.call),
           label: const Text('Accept'),
