@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/auth_service.dart';
 import '../services/message_service.dart';
-import 'group_call_page.dart';
+import 'meeting_call_page.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MeetingPage — Zoom-style meetings
@@ -337,11 +337,11 @@ class _MeetingPageState extends State<MeetingPage>
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (_) => GroupCallPage(
-                groupId: groupId,
-                groupName: name,
-                callType: GroupCallType.video,
-                isCaller: true,
+              builder: (_) => MeetingCallPage(
+                roomId: groupId,
+                meetingName: name,
+                meetingCode: code,
+                isHost: true,
               ),
             ),
           ).then((_) {
@@ -407,18 +407,16 @@ class _MeetingPageState extends State<MeetingPage>
               final code = ctrl.text.trim();
               if (code.isEmpty) return;
               Navigator.pop(ctx);
-              final groupId =
+              final roomId =
                   code.replaceAll('-', '').hashCode.abs() % 99999 + 1;
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => GroupCallPage(
-                    groupId: groupId,
-                    groupName: 'Meeting $code',
-                    callType: GroupCallType.video,
-                    // Join as caller=true so we go straight to active call screen
-                    // without waiting for a group_call_invite
-                    isCaller: true,
+                  builder: (_) => MeetingCallPage(
+                    roomId: roomId,
+                    meetingName: 'Meeting $code',
+                    meetingCode: code,
+                    isHost: false, // joiner — waits for host offer
                   ),
                 ),
               );
