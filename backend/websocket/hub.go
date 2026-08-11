@@ -214,17 +214,21 @@ type Hub struct {
 	webrtcWaiting []uint
 	webrtcPairs   map[uint]uint
 	webrtcMu      sync.RWMutex
+	// Meeting rooms: code → host user ID
+	meetingRooms map[string]uint
+	meetingMu    sync.RWMutex
 }
 
 func NewHub(db *gorm.DB) *Hub {
 	return &Hub{
 		clients:       make(map[uint]*Client),
 		broadcast:     make(chan []byte, 512),
-		register:      make(chan *Client, 64),   // buffered so WS upgrade never blocks
-		unregister:    make(chan *Client, 64),    // buffered so disconnect never blocks
+		register:      make(chan *Client, 64),
+		unregister:    make(chan *Client, 64),
 		db:            db,
 		webrtcWaiting: []uint{},
 		webrtcPairs:   make(map[uint]uint),
+		meetingRooms:  make(map[string]uint),
 	}
 }
 
@@ -569,6 +573,63 @@ func (h *Hub) handleMessage(client *Client, msgType string, payload json.RawMess
 	switch msgType {
 	case TypePing:
 		client.send <- buildMsg(TypePong, nil)
+
+	// ── Meeting room: host registers, joiner gets host's real user ID ─────
+	case "meeting_host":
+		// Host registers their presence in a room
+		var p struct { Code string `json:"code"` }
+		if err := json.Unmarshal(payload, &p); err != nil { return }
+		h.meetingMu.Lock()
+		h.meetingRooms[p.Code] = client.user.ID
+		h.meetingMu.Unlock()
+		log.Printf("🏠 Meeting host: user=%d code=%s", client.user.ID, p.Code)
+		// Ack
+		ack, _ := json.Marshal(map[string]interface{}{"code": p.Code, "status": "hosting"})
+		client.send <- buildMsg("meeting_hosting", ack)
+
+	case "meeting_join":
+		// Joiner asks: who is the host for this code?
+		var p struct { Code string `json:"code"` }
+		if err := json.Unmarshal(payload, &p); err != nil { return }
+		h.meetingMu.RLock()
+		hostID, exists := h.meetingRooms[p.Code]
+		h.meetingMu.RUnlock()
+		if !exists || hostID == 0 {
+			// No host yet — tell joiner to wait
+			noHost, _ := json.Marshal(map[string]interface{}{"code": p.Code, "status": "no_host"})
+			client.send <- buildMsg("meeting_join_result", noHost)
+			return
+		}
+		// Load host info
+		var host models.User
+		h.db.First(&host, hostID)
+		result, _ := json.Marshal(map[string]interface{}{
+			"code":        p.Code,
+			"status":      "found",
+			"host_id":     hostID,
+			"host_name":   host.FullName,
+			"host_avatar": host.ProfileImage,
+		})
+		client.send <- buildMsg("meeting_join_result", result)
+		// Also notify host that someone joined
+		joinNotify, _ := json.Marshal(map[string]interface{}{
+			"code":         p.Code,
+			"joiner_id":    client.user.ID,
+			"joiner_name":  client.user.FullName,
+			"joiner_avatar": client.user.ProfileImage,
+		})
+		h.SendToUser(hostID, buildMsg("meeting_joiner", joinNotify))
+		log.Printf("🤝 Meeting join: joiner=%d → host=%d code=%s", client.user.ID, hostID, p.Code)
+
+	case "meeting_leave":
+		// Host/joiner leaving — clean up room
+		var p struct { Code string `json:"code"` }
+		if err := json.Unmarshal(payload, &p); err != nil { return }
+		h.meetingMu.Lock()
+		if h.meetingRooms[p.Code] == client.user.ID {
+			delete(h.meetingRooms, p.Code)
+		}
+		h.meetingMu.Unlock()
 
 	// ── WebRTC Random Matching ────────────────────────────────────────────
 	case "webrtc_find_peer":

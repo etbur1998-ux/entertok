@@ -4,25 +4,25 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../services/websocket_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MeetingCallPage — Zoom-style meeting room
+// MeetingCallPage — real room-based video meeting
 //
-// Works like a video call room identified by a numeric roomId derived from
-// the meeting code. Two modes:
+// Signaling flow:
+//  HOST:
+//    1. Send `meeting_host` → backend stores code→hostUserId
+//    2. Wait for `meeting_joiner` events (joiner knocked)
+//    3. For each joiner → create WebRTC peer connection → send offer to joinerId
 //
-//  • HOST   (isHost=true):  gets media → creates offer → waits for anyone
-//                           who joins (via onWebRTCOffer/Answer)
-//  • JOINER (isHost=false): gets media → waits for host offer → answers it
-//
-// Both sides use the same roomId so WS routes signaling between them.
-// Supports multiple participants via a simple mesh: each person creates a
-// peer connection to every other person.
+//  JOINER:
+//    1. Send `meeting_join` → backend returns host's real userId
+//    2. Connect to host → receive their WebRTC offer → answer it
+//    3. Also get offers from any other participants
 // ─────────────────────────────────────────────────────────────────────────────
 
 class MeetingCallPage extends StatefulWidget {
-  final int roomId; // derived from meeting code
-  final String meetingName; // display name
-  final String meetingCode; // shown in UI
-  final bool isHost; // true = started the meeting
+  final int roomId;
+  final String meetingName;
+  final String meetingCode;
+  final bool isHost;
 
   const MeetingCallPage({
     super.key,
@@ -36,15 +36,14 @@ class MeetingCallPage extends StatefulWidget {
   State<MeetingCallPage> createState() => _MeetingCallPageState();
 }
 
-class _Peer {
+class _Participant {
   final int userId;
-  final String name;
+  String name;
   RTCPeerConnection? pc;
   final RTCVideoRenderer renderer = RTCVideoRenderer();
   bool connected = false;
 
-  _Peer({required this.userId, required this.name});
-
+  _Participant({required this.userId, required this.name});
   Future<void> init() async => await renderer.initialize();
   Future<void> dispose() async {
     await pc?.close();
@@ -58,21 +57,27 @@ class _MeetingCallPageState extends State<MeetingCallPage>
 
   MediaStream? _localStream;
   final RTCVideoRenderer _local = RTCVideoRenderer();
-  bool _localReady = false;
 
-  final Map<int, _Peer> _peers = {};
-  final List<RTCIceCandidate> _pendingIce = [];
+  final Map<int, _Participant> _participants = {};
+  // ICE candidates buffered before remote desc set: peerId → list
+  final Map<int, List<RTCIceCandidate>> _iceBuf = {};
 
   bool _micOn = true;
   bool _camOn = true;
   bool _screenSharing = false;
   MediaStream? _screenStream;
+  bool _localReady = false;
 
   Duration _elapsed = Duration.zero;
   Timer? _timer;
-  bool _connected = false;
+  String _status = 'Connecting...';
 
+  StreamSubscription? _subHosting, _subJoinResult, _subJoiner;
   StreamSubscription? _subOffer, _subAnswer, _subIce, _subHangup;
+
+  // Retry join timer (joiner polls until host is found)
+  Timer? _joinRetry;
+  int _joinAttempts = 0;
 
   static const _iceConfig = {
     'iceServers': [
@@ -95,13 +100,22 @@ class _MeetingCallPageState extends State<MeetingCallPage>
     setState(() => _localReady = true);
     await _getMedia();
     _listenSignals();
-    // Host sends offer with roomId as the target
-    // Joiner waits for offer from host
+
     if (widget.isHost) {
-      // Announce presence — send a "ping offer" to room
-      // We use roomId as peerId for signaling routing
-      await _createPeer(widget.roomId, shouldOffer: true);
+      // Register in room — backend stores our userId for joiners to find
+      _ws.meetingHost(widget.meetingCode);
+      setState(() => _status = 'Waiting for participants...');
+    } else {
+      // Wait 1 second before first poll — gives host time to register
+      setState(() => _status = 'Connecting to meeting...');
+      await Future.delayed(const Duration(seconds: 1));
+      _tryJoin();
     }
+  }
+
+  void _tryJoin() {
+    _ws.meetingJoin(widget.meetingCode);
+    setState(() => _status = 'Looking for host...');
   }
 
   Future<void> _getMedia() async {
@@ -117,105 +131,105 @@ class _MeetingCallPageState extends State<MeetingCallPage>
     }
   }
 
-  Future<_Peer> _createPeer(int uid, {bool shouldOffer = false}) async {
-    if (_peers.containsKey(uid)) return _peers[uid]!;
-    final peer = _Peer(userId: uid, name: 'Participant');
-    await peer.init();
-    _peers[uid] = peer;
-
-    peer.pc = await createPeerConnection(_iceConfig);
-    _localStream?.getTracks().forEach(
-      (t) async => await peer.pc!.addTrack(t, _localStream!),
-    );
-
-    peer.pc!.onIceCandidate = (c) {
-      if (c.candidate != null) _ws.webrtcSendIce(uid, c.toMap());
-    };
-
-    peer.pc!.onTrack = (event) {
-      if (event.streams.isNotEmpty && mounted) {
-        setState(() {
-          peer.renderer.srcObject = event.streams.first;
-          peer.connected = true;
-          _connected = true;
-        });
-        _startTimer();
-      }
-    };
-
-    peer.pc!.onConnectionState = (s) {
-      if (!mounted) return;
-      if (s == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-        setState(() {
-          peer.connected = true;
-          _connected = true;
-        });
-        _startTimer();
-      } else if (s ==
-              RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
-          s == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-        setState(() {
-          peer.connected = false;
-        });
-      }
-    };
-
-    if (shouldOffer) {
-      final offer = await peer.pc!.createOffer({
-        'offerToReceiveAudio': true,
-        'offerToReceiveVideo': true,
-      });
-      await peer.pc!.setLocalDescription(offer);
-      _ws.webrtcSendOffer(uid, offer.toMap());
-      debugPrint('MeetingCall: sent offer to room peer $uid');
-    }
-
-    if (mounted) setState(() {});
-    return peer;
-  }
-
   void _listenSignals() {
+    // Host confirmed hosting
+    _subHosting = _ws.onMeetingHosting.listen((data) {
+      if (mounted) setState(() => _status = 'Waiting for participants...');
+      debugPrint('Meeting: hosting confirmed for ${data['code']}');
+    });
+
+    // Joiner received host info
+    _subJoinResult = _ws.onMeetingJoinResult.listen((data) async {
+      final status = data['status']?.toString();
+      if (status == 'no_host') {
+        _joinAttempts++;
+        if (mounted) {
+          setState(() => _status = 'Waiting for host... ($_joinAttempts)');
+        }
+        if (_joinAttempts < 20) {
+          _joinRetry?.cancel();
+          _joinRetry = Timer(const Duration(seconds: 3), _tryJoin);
+        } else if (mounted) {
+          setState(() => _status = 'Host not found. Check the code.');
+        }
+        return;
+      }
+      // Found host — create connection and wait for their offer
+      final hostId = (data['host_id'] as num?)?.toInt();
+      final hostName = data['host_name']?.toString() ?? 'Host';
+      if (hostId == null) return;
+      _joinRetry?.cancel();
+      debugPrint('Meeting: found host=$hostId, setting up...');
+      await _createParticipant(hostId, name: hostName, sendOffer: false);
+      setState(() => _status = 'Connecting to host...');
+    });
+
+    // Someone joined our meeting (host receives this)
+    _subJoiner = _ws.onMeetingJoiner.listen((data) async {
+      final joinerId = (data['joiner_id'] as num?)?.toInt();
+      final joinerName = data['joiner_name']?.toString() ?? 'Participant';
+      if (joinerId == null || !mounted) return;
+      debugPrint('Meeting: joiner=$joinerId joined');
+      // Create peer and send offer to joiner
+      await _createParticipant(joinerId, name: joinerName, sendOffer: true);
+      setState(() => _status = '');
+    });
+
+    // Incoming offer (joiner receives from host, or mesh peer)
     _subOffer = _ws.onWebRTCOffer.listen((data) async {
       final fromId = (data['from_user_id'] as num?)?.toInt();
       if (fromId == null) return;
-      debugPrint('MeetingCall: received offer from $fromId');
-
-      final peer = await _createPeer(fromId, shouldOffer: false);
+      debugPrint('Meeting: offer from $fromId');
+      final p =
+          _participants[fromId] ??
+          await _createParticipant(
+            fromId,
+            name: 'Participant',
+            sendOffer: false,
+          );
       final sdpMap = data['data'] as Map<String, dynamic>? ?? {};
-      await peer.pc!.setRemoteDescription(
+      await p.pc!.setRemoteDescription(
         RTCSessionDescription(
           sdpMap['sdp'] as String? ?? '',
           sdpMap['type'] as String? ?? 'offer',
         ),
       );
-      // Flush pending ICE
-      for (final c in _pendingIce) {
+      // Flush buffered ICE
+      for (final c in (_iceBuf[fromId] ?? [])) {
         try {
-          await peer.pc!.addCandidate(c);
+          await p.pc!.addCandidate(c);
         } catch (_) {}
       }
-      _pendingIce.clear();
+      _iceBuf.remove(fromId);
 
-      final ans = await peer.pc!.createAnswer();
-      await peer.pc!.setLocalDescription(ans);
+      final ans = await p.pc!.createAnswer();
+      await p.pc!.setLocalDescription(ans);
       _ws.webrtcSendAnswer(fromId, ans.toMap());
+      if (mounted) setState(() => _status = '');
     });
 
+    // Answer from peer
     _subAnswer = _ws.onWebRTCAnswer.listen((data) async {
       final fromId = (data['from_user_id'] as num?)?.toInt();
       if (fromId == null) return;
       final sdpMap = data['data'] as Map<String, dynamic>? ?? {};
-      final peer = _peers[fromId];
-      if (peer?.pc != null) {
-        await peer!.pc!.setRemoteDescription(
-          RTCSessionDescription(
-            sdpMap['sdp'] as String? ?? '',
-            sdpMap['type'] as String? ?? 'answer',
-          ),
-        );
+      final p = _participants[fromId];
+      await p?.pc?.setRemoteDescription(
+        RTCSessionDescription(
+          sdpMap['sdp'] as String? ?? '',
+          sdpMap['type'] as String? ?? 'answer',
+        ),
+      );
+      // Flush buffered ICE
+      for (final c in (_iceBuf[fromId] ?? [])) {
+        try {
+          await p!.pc!.addCandidate(c);
+        } catch (_) {}
       }
+      _iceBuf.remove(fromId);
     });
 
+    // ICE candidate
     _subIce = _ws.onWebRTCIce.listen((data) async {
       final fromId = (data['from_user_id'] as num?)?.toInt();
       if (fromId == null) return;
@@ -226,24 +240,84 @@ class _MeetingCallPageState extends State<MeetingCallPage>
         c['sdpMid'] as String? ?? '',
         (c['sdpMLineIndex'] as num?)?.toInt() ?? 0,
       );
-      final peer = _peers[fromId];
-      if (peer?.pc != null) {
+      final p = _participants[fromId];
+      if (p?.pc != null) {
         try {
-          await peer!.pc!.addCandidate(cand);
+          await p!.pc!.addCandidate(cand);
         } catch (_) {}
       } else {
-        _pendingIce.add(cand); // buffer until peer is created
+        _iceBuf.putIfAbsent(fromId, () => []).add(cand);
       }
     });
 
+    // Hangup
     _subHangup = _ws.onWebRTCHangup.listen((data) {
       final fromId = (data['from_user_id'] as num?)?.toInt();
       if (fromId == null || !mounted) return;
       setState(() {
-        _peers[fromId]?.renderer.srcObject = null;
-        _peers[fromId]?.connected = false;
+        _participants[fromId]?.renderer.srcObject = null;
+        _participants[fromId]?.connected = false;
       });
     });
+  }
+
+  Future<_Participant> _createParticipant(
+    int uid, {
+    required String name,
+    required bool sendOffer,
+  }) async {
+    if (_participants.containsKey(uid)) return _participants[uid]!;
+    final p = _Participant(userId: uid, name: name);
+    await p.init();
+    _participants[uid] = p;
+
+    p.pc = await createPeerConnection(_iceConfig);
+    _localStream?.getTracks().forEach(
+      (t) async => await p.pc!.addTrack(t, _localStream!),
+    );
+
+    p.pc!.onIceCandidate = (c) {
+      if (c.candidate != null) _ws.webrtcSendIce(uid, c.toMap());
+    };
+
+    p.pc!.onTrack = (event) {
+      if (event.streams.isNotEmpty && mounted) {
+        setState(() {
+          p.renderer.srcObject = event.streams.first;
+          p.connected = true;
+          _status = '';
+        });
+        _startTimer();
+      }
+    };
+
+    p.pc!.onConnectionState = (s) {
+      if (!mounted) return;
+      if (s == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        setState(() {
+          p.connected = true;
+          _status = '';
+        });
+        _startTimer();
+      } else if (s ==
+              RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
+          s == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        setState(() => p.connected = false);
+      }
+    };
+
+    if (sendOffer) {
+      final offer = await p.pc!.createOffer({
+        'offerToReceiveAudio': true,
+        'offerToReceiveVideo': true,
+      });
+      await p.pc!.setLocalDescription(offer);
+      _ws.webrtcSendOffer(uid, offer.toMap());
+      debugPrint('Meeting: sent offer to $uid');
+    }
+
+    if (mounted) setState(() {});
+    return p;
   }
 
   void _startTimer() {
@@ -253,7 +327,7 @@ class _MeetingCallPageState extends State<MeetingCallPage>
     });
   }
 
-  String get _elapsed2 {
+  String get _elapsedStr {
     final m = _elapsed.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = _elapsed.inSeconds.remainder(60).toString().padLeft(2, '0');
     return '$m:$s';
@@ -276,8 +350,8 @@ class _MeetingCallPageState extends State<MeetingCallPage>
       _screenStream = null;
       final camTrack = _localStream?.getVideoTracks().firstOrNull;
       if (camTrack != null) {
-        for (final peer in _peers.values) {
-          final senders = await peer.pc?.getSenders() ?? [];
+        for (final p in _participants.values) {
+          final senders = await p.pc?.getSenders() ?? [];
           for (final s in senders) {
             if (s.track?.kind == 'video') {
               await s.replaceTrack(camTrack);
@@ -299,8 +373,8 @@ class _MeetingCallPageState extends State<MeetingCallPage>
         });
         if (!mounted) return;
         final screenTrack = _screenStream!.getVideoTracks().first;
-        for (final peer in _peers.values) {
-          final senders = await peer.pc?.getSenders() ?? [];
+        for (final p in _participants.values) {
+          final senders = await p.pc?.getSenders() ?? [];
           for (final s in senders) {
             if (s.track?.kind == 'video') {
               await s.replaceTrack(screenTrack);
@@ -315,13 +389,14 @@ class _MeetingCallPageState extends State<MeetingCallPage>
           _camOn = false;
         });
       } catch (e) {
-        debugPrint('Screen share error: $e');
+        debugPrint('Screen share: $e');
       }
     }
   }
 
   void _endMeeting() {
-    for (final uid in _peers.keys) {
+    _ws.meetingLeave(widget.meetingCode);
+    for (final uid in _participants.keys) {
       _ws.webrtcHangup(uid);
     }
     Navigator.pop(context);
@@ -339,14 +414,18 @@ class _MeetingCallPageState extends State<MeetingCallPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _subHosting?.cancel();
+    _subJoinResult?.cancel();
+    _subJoiner?.cancel();
     _subOffer?.cancel();
     _subAnswer?.cancel();
     _subIce?.cancel();
     _subHangup?.cancel();
     _timer?.cancel();
+    _joinRetry?.cancel();
     _screenStream?.getTracks().forEach((t) => t.stop());
     _screenStream?.dispose();
-    for (final p in _peers.values) {
+    for (final p in _participants.values) {
       p.dispose();
     }
     _localStream?.dispose();
@@ -356,15 +435,16 @@ class _MeetingCallPageState extends State<MeetingCallPage>
 
   @override
   Widget build(BuildContext context) {
+    final connected = _participants.values.where((p) => p.connected).length;
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(
           children: [
-            // ── Top bar ──────────────────────────────────────────────
+            // Top bar
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               color: Colors.black,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               child: Row(
                 children: [
                   IconButton(
@@ -387,8 +467,10 @@ class _MeetingCallPageState extends State<MeetingCallPage>
                           ),
                         ),
                         Text(
-                          _connected
-                              ? '${_peers.values.where((p) => p.connected).length + 1} participants · $_elapsed2'
+                          _status.isNotEmpty
+                              ? _status
+                              : connected > 0
+                              ? '${connected + 1} participants · $_elapsedStr'
                               : 'Waiting for participants...',
                           style: TextStyle(
                             color: Colors.grey[400],
@@ -402,12 +484,11 @@ class _MeetingCallPageState extends State<MeetingCallPage>
                 ],
               ),
             ),
-            // Screen sharing banner
             if (_screenSharing)
               Container(
                 width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 6),
                 color: Colors.orange.withOpacity(0.88),
+                padding: const EdgeInsets.symmetric(vertical: 6),
                 child: const Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -424,9 +505,7 @@ class _MeetingCallPageState extends State<MeetingCallPage>
                   ],
                 ),
               ),
-            // ── Video grid ───────────────────────────────────────────
-            Expanded(child: _videoGrid()),
-            // ── Controls ─────────────────────────────────────────────
+            Expanded(child: _grid()),
             _controls(),
           ],
         ),
@@ -434,13 +513,10 @@ class _MeetingCallPageState extends State<MeetingCallPage>
     );
   }
 
-  Widget _videoGrid() {
-    final tiles = <Widget>[_localTile()];
-    for (final p in _peers.values) {
-      if (p.connected) tiles.add(_remoteTile(p));
-    }
-    // If no one connected yet — show waiting message in the grid
-    if (tiles.length == 1 && !_connected) {
+  Widget _grid() {
+    final connected = _participants.values.where((p) => p.connected).toList();
+    // Show waiting overlay when no one connected
+    if (connected.isEmpty) {
       return Stack(
         fit: StackFit.expand,
         children: [
@@ -449,17 +525,17 @@ class _MeetingCallPageState extends State<MeetingCallPage>
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const SizedBox(height: 100),
+                const SizedBox(height: 80),
                 Icon(
                   Icons.link,
-                  size: 48,
-                  color: Colors.white.withOpacity(0.4),
+                  size: 44,
+                  color: Colors.white.withOpacity(0.35),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
                 Text(
                   'Share code: ${widget.meetingCode}',
                   style: TextStyle(
-                    color: Colors.white.withOpacity(0.7),
+                    color: Colors.white.withOpacity(0.65),
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
                     letterSpacing: 2,
@@ -467,7 +543,9 @@ class _MeetingCallPageState extends State<MeetingCallPage>
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  'Waiting for others to join...',
+                  _status.isNotEmpty
+                      ? _status
+                      : 'Waiting for others to join...',
                   style: TextStyle(color: Colors.grey[500], fontSize: 13),
                 ),
               ],
@@ -477,10 +555,13 @@ class _MeetingCallPageState extends State<MeetingCallPage>
       );
     }
 
-    final count = tiles.length;
-    final cols = count <= 1
+    final tiles = <Widget>[_localTile()];
+    for (final p in connected) {
+      tiles.add(_remoteTile(p));
+    }
+    final cols = tiles.length <= 1
         ? 1
-        : count <= 4
+        : tiles.length <= 4
         ? 2
         : 3;
     return GridView.builder(
@@ -517,19 +598,19 @@ class _MeetingCallPageState extends State<MeetingCallPage>
                   ),
                 ),
               ),
-        Positioned(bottom: 6, left: 6, child: _nameTag('You', !_micOn)),
+        Positioned(bottom: 6, left: 6, child: _tag('You', !_micOn)),
       ],
     ),
   );
 
-  Widget _remoteTile(_Peer peer) => ClipRRect(
+  Widget _remoteTile(_Participant p) => ClipRRect(
     borderRadius: BorderRadius.circular(10),
     child: Stack(
       fit: StackFit.expand,
       children: [
-        peer.renderer.srcObject != null
+        p.renderer.srcObject != null
             ? RTCVideoView(
-                peer.renderer,
+                p.renderer,
                 objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
               )
             : Container(
@@ -539,7 +620,7 @@ class _MeetingCallPageState extends State<MeetingCallPage>
                     radius: 32,
                     backgroundColor: Colors.blue,
                     child: Text(
-                      peer.name.isNotEmpty ? peer.name[0].toUpperCase() : '?',
+                      p.name.isNotEmpty ? p.name[0].toUpperCase() : '?',
                       style: const TextStyle(
                         color: Colors.white,
                         fontSize: 22,
@@ -549,12 +630,12 @@ class _MeetingCallPageState extends State<MeetingCallPage>
                   ),
                 ),
               ),
-        Positioned(bottom: 6, left: 6, child: _nameTag(peer.name, false)),
+        Positioned(bottom: 6, left: 6, child: _tag(p.name, false)),
       ],
     ),
   );
 
-  Widget _nameTag(String name, bool muted) => Container(
+  Widget _tag(String n, bool muted) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
     decoration: BoxDecoration(
       color: Colors.black54,
@@ -568,7 +649,7 @@ class _MeetingCallPageState extends State<MeetingCallPage>
           const SizedBox(width: 3),
         ],
         Text(
-          name,
+          n,
           style: const TextStyle(
             color: Colors.white,
             fontSize: 11,
@@ -580,8 +661,8 @@ class _MeetingCallPageState extends State<MeetingCallPage>
   );
 
   Widget _controls() => Container(
-    padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
     color: Colors.black,
+    padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
     child: Row(
       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
       children: [
@@ -597,7 +678,6 @@ class _MeetingCallPageState extends State<MeetingCallPage>
           _toggleCam,
           label: _camOn ? 'Cam' : 'Cam off',
         ),
-        // End meeting button
         GestureDetector(
           onTap: _endMeeting,
           child: Column(
@@ -630,7 +710,7 @@ class _MeetingCallPageState extends State<MeetingCallPage>
           _toggleScreenShare,
           label: _screenSharing ? 'Stop' : 'Share',
         ),
-        _btn(Icons.people, Colors.white, _showParticipants, label: 'Members'),
+        _btn(Icons.people, Colors.white, _showPeople, label: 'Members'),
       ],
     ),
   );
@@ -665,7 +745,8 @@ class _MeetingCallPageState extends State<MeetingCallPage>
     ),
   );
 
-  void _showParticipants() {
+  void _showPeople() {
+    final connected = _participants.values.where((p) => p.connected).toList();
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1A1A2E),
@@ -680,7 +761,7 @@ class _MeetingCallPageState extends State<MeetingCallPage>
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                '${_peers.values.where((p) => p.connected).length + 1} Participants',
+                '${connected.length + 1} Participants',
                 style: const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.bold,
@@ -700,41 +781,35 @@ class _MeetingCallPageState extends State<MeetingCallPage>
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (!_micOn)
-                      const Icon(Icons.mic_off, color: Colors.red, size: 16),
-                    const SizedBox(width: 4),
-                    const Icon(Icons.circle, color: Colors.green, size: 9),
-                  ],
+                trailing: const Icon(
+                  Icons.circle,
+                  color: Colors.green,
+                  size: 9,
                 ),
               ),
-              ..._peers.values
-                  .where((p) => p.connected)
-                  .map(
-                    (p) => ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: Colors.blue,
-                        child: Text(
-                          p.name.isNotEmpty ? p.name[0].toUpperCase() : '?',
-                          style: const TextStyle(color: Colors.white),
-                        ),
-                      ),
-                      title: Text(
-                        p.name,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      trailing: const Icon(
-                        Icons.circle,
-                        color: Colors.green,
-                        size: 9,
-                      ),
+              ...connected.map(
+                (p) => ListTile(
+                  leading: CircleAvatar(
+                    backgroundColor: Colors.blue,
+                    child: Text(
+                      p.name.isNotEmpty ? p.name[0].toUpperCase() : '?',
+                      style: const TextStyle(color: Colors.white),
                     ),
                   ),
+                  title: Text(
+                    p.name,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  trailing: const Icon(
+                    Icons.circle,
+                    color: Colors.green,
+                    size: 9,
+                  ),
+                ),
+              ),
             ],
           ),
         ),

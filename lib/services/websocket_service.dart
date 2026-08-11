@@ -341,6 +341,15 @@ class WebSocketService {
       case 'group_call_end':
         _groupCallEndCtrl.add(p);
         break;
+      case 'meeting_hosting':
+        _meetingHostingCtrl.add(p);
+        break;
+      case 'meeting_join_result':
+        _meetingJoinResultCtrl.add(p);
+        break;
+      case 'meeting_joiner':
+        _meetingJoinerCtrl.add(p);
+        break;
     }
   }
 
@@ -480,6 +489,12 @@ class WebSocketService {
   final _groupCallDeclineCtrl =
       StreamController<Map<String, dynamic>>.broadcast();
   final _groupCallEndCtrl = StreamController<Map<String, dynamic>>.broadcast();
+  // Meeting room
+  final _meetingHostingCtrl =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _meetingJoinResultCtrl =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _meetingJoinerCtrl = StreamController<Map<String, dynamic>>.broadcast();
 
   Stream<Map<String, dynamic>> get onGroupCallInvite =>
       _groupCallInviteCtrl.stream;
@@ -487,6 +502,11 @@ class WebSocketService {
   Stream<Map<String, dynamic>> get onGroupCallDecline =>
       _groupCallDeclineCtrl.stream;
   Stream<Map<String, dynamic>> get onGroupCallEnd => _groupCallEndCtrl.stream;
+  Stream<Map<String, dynamic>> get onMeetingHosting =>
+      _meetingHostingCtrl.stream;
+  Stream<Map<String, dynamic>> get onMeetingJoinResult =>
+      _meetingJoinResultCtrl.stream;
+  Stream<Map<String, dynamic>> get onMeetingJoiner => _meetingJoinerCtrl.stream;
 
   /// Invite all group members to a call
   void sendGroupCallInvite(int groupId, String groupName, String callType) =>
@@ -515,6 +535,26 @@ class WebSocketService {
   void sendGroupCallEnd(int groupId) => _send({
     'type': 'group_call_end',
     'payload': {'group_id': groupId},
+  });
+
+  // ─── Meeting room signaling ───────────────────────────────────────────────
+
+  /// Host registers in a meeting room
+  void meetingHost(String code) => _send({
+    'type': 'meeting_host',
+    'payload': {'code': code},
+  });
+
+  /// Joiner asks for host info
+  void meetingJoin(String code) => _send({
+    'type': 'meeting_join',
+    'payload': {'code': code},
+  });
+
+  /// Leave/close a meeting room
+  void meetingLeave(String code) => _send({
+    'type': 'meeting_leave',
+    'payload': {'code': code},
   });
 
   void joinLiveStream(int streamId) {
@@ -581,5 +621,8 @@ class WebSocketService {
     _groupCallJoinCtrl.close();
     _groupCallDeclineCtrl.close();
     _groupCallEndCtrl.close();
+    _meetingHostingCtrl.close();
+    _meetingJoinResultCtrl.close();
+    _meetingJoinerCtrl.close();
   }
 }
