@@ -1,21 +1,12 @@
-import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/auth_service.dart';
-import '../services/user_service.dart';
+import '../services/message_service.dart';
 import 'group_call_page.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MeetingPage — Zoom-style video meetings
-//
-// Features:
-//   • New instant meeting → starts a group video call
-//   • Join by meeting code
-//   • Schedule a meeting (with date/time picker)
-//   • Share meeting link / copy code
-//   • Upcoming & past meetings list
-//   • Real-time: new meeting invites arrive via WS group_call_invite
+// MeetingPage — Zoom-style meetings
 // ─────────────────────────────────────────────────────────────────────────────
 
 class MeetingPage extends StatefulWidget {
@@ -27,28 +18,20 @@ class MeetingPage extends StatefulWidget {
 class _MeetingPageState extends State<MeetingPage>
     with SingleTickerProviderStateMixin {
   late TabController _tab;
-  final UserService _userService = UserService();
+  final MessageService _msgSvc = MessageService();
 
-  // Scheduled meetings (stored locally for now — no backend endpoint needed)
-  final List<_Meeting> _scheduled = [];
+  final List<_Meeting> _upcoming = [];
   final List<_Meeting> _past = [];
   String _myName = 'Me';
+  bool _creatingMeeting = false;
 
   @override
   void initState() {
     super.initState();
     _tab = TabController(length: 2, vsync: this);
-    _loadMyInfo();
-  }
-
-  Future<void> _loadMyInfo() async {
     final user = AuthService().currentUser;
-    setState(() {
-      _myName =
-          user?['full_name']?.toString() ??
-          user?['username']?.toString() ??
-          'Me';
-    });
+    _myName =
+        user?['full_name']?.toString() ?? user?['username']?.toString() ?? 'Me';
   }
 
   @override
@@ -57,61 +40,311 @@ class _MeetingPageState extends State<MeetingPage>
     super.dispose();
   }
 
-  // ── Generate a 9-digit meeting code ───────────────────────────────────────
-  String _generateCode() {
+  String _genCode() {
     final r = Random();
-    final a = 100 + r.nextInt(900);
-    final b = 100 + r.nextInt(900);
-    final c = 100 + r.nextInt(900);
-    return '$a-$b-$c';
+    return '${100 + r.nextInt(900)}-${100 + r.nextInt(900)}-${100 + r.nextInt(900)}';
   }
 
-  // ── Start instant meeting ─────────────────────────────────────────────────
-  void _startInstantMeeting() async {
-    // Pick participants
-    final picked = await _showParticipantPicker();
-    if (picked == null || picked.isEmpty) return;
-
-    final code = _generateCode();
-    final meetingName = '$_myName\'s Meeting';
-
-    // Create a fake group conversation for this meeting
-    // For simplicity: use the first participant as group context
-    // In a full implementation, create a temporary group
-    final groupId = DateTime.now().millisecondsSinceEpoch % 100000;
-
-    // Add to past after navigation returns
-    if (mounted) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => GroupCallPage(
-            groupId: groupId,
-            groupName: meetingName,
-            callType: GroupCallType.video,
-            isCaller: true,
+  // ── NEW MEETING — show options sheet, then start ──────────────────────────
+  void _newMeeting() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'New Meeting',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 20),
+              // Option 1: Start now solo (share code for others to join)
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.deepPurple.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(
+                    Icons.video_call_rounded,
+                    color: Colors.deepPurple,
+                    size: 26,
+                  ),
+                ),
+                title: const Text(
+                  'Start an Instant Meeting',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                subtitle: const Text(
+                  'Start now — share the code to invite others',
+                ),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _startInstant();
+                },
+              ),
+              const Divider(),
+              // Option 2: Pick participants first
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(
+                    Icons.group_add_rounded,
+                    color: Colors.blue,
+                    size: 26,
+                  ),
+                ),
+                title: const Text(
+                  'Invite People to Meet',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                subtitle: const Text('Pick contacts and start immediately'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _startWithPeople();
+                },
+              ),
+              const Divider(),
+              // Option 3: Schedule for later
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(
+                    Icons.calendar_month_rounded,
+                    color: Colors.orange,
+                    size: 26,
+                  ),
+                ),
+                title: const Text(
+                  'Schedule for Later',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                subtitle: const Text('Pick a date and time'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _scheduleMeeting();
+                },
+              ),
+            ],
           ),
         ),
-      ).then((_) {
-        setState(() {
-          _past.insert(
-            0,
-            _Meeting(
-              title: meetingName,
-              code: code,
-              time: DateTime.now(),
-              participants: picked.length + 1,
-              isPast: true,
+      ),
+    );
+  }
+
+  // Start alone — show the code, let others join
+  void _startInstant() {
+    final code = _genCode();
+    final name = '$_myName\'s Meeting';
+    final groupId = DateTime.now().millisecondsSinceEpoch % 99999 + 1;
+    _launchCall(code: code, name: name, groupId: groupId);
+  }
+
+  // Pick participants first
+  void _startWithPeople() async {
+    final groups = await _msgSvc.getUserGroups();
+    if (!mounted) return;
+
+    // Show existing groups to pick from
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        builder: (_, sc) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  const Text(
+                    'Start Group Call',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _startInstant(); // fallback: start solo
+                    },
+                    icon: const Icon(Icons.add),
+                    label: const Text('New Group'),
+                  ),
+                ],
+              ),
             ),
-          );
-        });
+            const Divider(height: 1),
+            if (groups.isEmpty)
+              const Expanded(
+                child: Center(
+                  child: Text(
+                    'No groups yet.\nCreate a group in Messages first.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ),
+              )
+            else
+              Expanded(
+                child: ListView.builder(
+                  controller: sc,
+                  itemCount: groups.length,
+                  itemBuilder: (_, i) {
+                    final g = groups[i];
+                    final gid = (g['id'] as num).toInt();
+                    final gname = g['group_name']?.toString() ?? 'Group';
+                    return ListTile(
+                      leading: const CircleAvatar(
+                        backgroundColor: Colors.deepPurple,
+                        child: Icon(Icons.group, color: Colors.white, size: 20),
+                      ),
+                      title: Text(gname),
+                      subtitle: Text('${g['member_count'] ?? 0} members'),
+                      trailing: ElevatedButton(
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          final code = _genCode();
+                          _launchCall(code: code, name: gname, groupId: gid);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.deepPurple,
+                          foregroundColor: Colors.white,
+                        ),
+                        child: const Text('Call'),
+                      ),
+                    );
+                  },
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _launchCall({
+    required String code,
+    required String name,
+    required int groupId,
+  }) async {
+    setState(() => _creatingMeeting = true);
+
+    // Show code before starting
+    if (mounted) {
+      await showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Meeting Ready'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Share this code so others can join:'),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 14,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.deepPurple.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      code,
+                      style: const TextStyle(
+                        fontSize: 26,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 3,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    IconButton(
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: code));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Code copied!')),
+                        );
+                      },
+                      icon: const Icon(Icons.copy, color: Colors.deepPurple),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton.icon(
+              onPressed: () => Navigator.pop(ctx, true),
+              icon: const Icon(Icons.video_call),
+              label: const Text('Start Now'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.deepPurple,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ).then((start) {
+        setState(() => _creatingMeeting = false);
+        if (start == true && mounted) {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => GroupCallPage(
+                groupId: groupId,
+                groupName: name,
+                callType: GroupCallType.video,
+                isCaller: true,
+              ),
+            ),
+          ).then((_) {
+            setState(() {
+              _past.insert(
+                0,
+                _Meeting(
+                  title: name,
+                  code: code,
+                  time: DateTime.now(),
+                  participants: 1,
+                ),
+              );
+            });
+          });
+        }
       });
     }
   }
 
-  // ── Join by code ──────────────────────────────────────────────────────────
-  void _showJoinDialog() {
-    final ctrl = TextEditingController();
+  // ── JOIN by code ──────────────────────────────────────────────────────────
+  void _joinMeeting([String? preCode]) {
+    final ctrl = TextEditingController(text: preCode ?? '');
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -120,7 +353,7 @@ class _MeetingPageState extends State<MeetingPage>
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text(
-              'Enter the meeting code to join',
+              'Enter the 9-digit meeting code',
               style: TextStyle(color: Colors.grey, fontSize: 13),
             ),
             const SizedBox(height: 16),
@@ -130,13 +363,12 @@ class _MeetingPageState extends State<MeetingPage>
               textAlign: TextAlign.center,
               style: const TextStyle(
                 fontSize: 22,
-                letterSpacing: 4,
                 fontWeight: FontWeight.bold,
+                letterSpacing: 3,
               ),
-              keyboardType: TextInputType.number,
               decoration: InputDecoration(
                 hintText: '000-000-000',
-                hintStyle: TextStyle(color: Colors.grey[400]),
+                hintStyle: TextStyle(color: Colors.grey[400], fontSize: 18),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
@@ -155,12 +387,25 @@ class _MeetingPageState extends State<MeetingPage>
               final code = ctrl.text.trim();
               if (code.isEmpty) return;
               Navigator.pop(ctx);
-              _joinMeeting(code);
+              final groupId =
+                  code.replaceAll('-', '').hashCode.abs() % 99999 + 1;
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => GroupCallPage(
+                    groupId: groupId,
+                    groupName: 'Meeting $code',
+                    callType: GroupCallType.video,
+                    isCaller: false,
+                    callerName: 'Meeting Host',
+                  ),
+                ),
+              );
             },
-            icon: const Icon(Icons.video_call),
+            icon: const Icon(Icons.videocam),
             label: const Text('Join'),
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.deepPurple,
+              backgroundColor: Colors.blue,
               foregroundColor: Colors.white,
             ),
           ),
@@ -169,28 +414,11 @@ class _MeetingPageState extends State<MeetingPage>
     );
   }
 
-  void _joinMeeting(String code) {
-    // Derive a groupId from the code for the call
-    final groupId = code.replaceAll('-', '').hashCode.abs() % 100000;
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => GroupCallPage(
-          groupId: groupId,
-          groupName: 'Meeting $code',
-          callType: GroupCallType.video,
-          isCaller: false,
-          callerName: 'Meeting Host',
-        ),
-      ),
-    );
-  }
-
-  // ── Schedule meeting ──────────────────────────────────────────────────────
-  void _showScheduleDialog() async {
-    final titleCtrl = TextEditingController();
-    DateTime? pickedDate;
-    TimeOfDay? pickedTime;
+  // ── SCHEDULE ─────────────────────────────────────────────────────────────
+  void _scheduleMeeting() async {
+    final titleCtrl = TextEditingController(text: '$_myName\'s Meeting');
+    DateTime? date;
+    TimeOfDay? time;
 
     await showDialog(
       context: context,
@@ -200,51 +428,58 @@ class _MeetingPageState extends State<MeetingPage>
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 TextField(
                   controller: titleCtrl,
                   decoration: InputDecoration(
-                    labelText: 'Meeting Title',
+                    labelText: 'Title',
                     prefixIcon: const Icon(Icons.title),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(10),
                     ),
                   ),
                 ),
-                const SizedBox(height: 16),
-                // Date picker
-                OutlinedButton.icon(
-                  onPressed: () async {
-                    final d = await showDatePicker(
-                      context: ctx,
-                      initialDate: DateTime.now().add(const Duration(days: 1)),
-                      firstDate: DateTime.now(),
-                      lastDate: DateTime.now().add(const Duration(days: 365)),
-                    );
-                    if (d != null) setS(() => pickedDate = d);
-                  },
-                  icon: const Icon(Icons.calendar_today),
-                  label: Text(
-                    pickedDate == null
-                        ? 'Pick Date'
-                        : '${pickedDate!.day}/${pickedDate!.month}/${pickedDate!.year}',
-                  ),
-                ),
-                const SizedBox(height: 8),
-                // Time picker
-                OutlinedButton.icon(
-                  onPressed: () async {
-                    final t = await showTimePicker(
-                      context: ctx,
-                      initialTime: TimeOfDay.now(),
-                    );
-                    if (t != null) setS(() => pickedTime = t);
-                  },
-                  icon: const Icon(Icons.access_time),
-                  label: Text(
-                    pickedTime == null ? 'Pick Time' : pickedTime!.format(ctx),
-                  ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          final d = await showDatePicker(
+                            context: ctx,
+                            initialDate: DateTime.now().add(
+                              const Duration(days: 1),
+                            ),
+                            firstDate: DateTime.now(),
+                            lastDate: DateTime.now().add(
+                              const Duration(days: 365),
+                            ),
+                          );
+                          if (d != null) setS(() => date = d);
+                        },
+                        icon: const Icon(Icons.calendar_today, size: 16),
+                        label: Text(
+                          date == null
+                              ? 'Date'
+                              : '${date!.day}/${date!.month}/${date!.year}',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          final t = await showTimePicker(
+                            context: ctx,
+                            initialTime: TimeOfDay.now(),
+                          );
+                          if (t != null) setS(() => time = t);
+                        },
+                        icon: const Icon(Icons.access_time, size: 16),
+                        label: Text(time == null ? 'Time' : time!.format(ctx)),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -256,33 +491,30 @@ class _MeetingPageState extends State<MeetingPage>
             ),
             ElevatedButton(
               onPressed: () {
-                final title = titleCtrl.text.trim();
-                if (title.isEmpty || pickedDate == null || pickedTime == null) {
-                  return;
-                }
+                final t = titleCtrl.text.trim();
+                if (t.isEmpty || date == null || time == null) return;
                 Navigator.pop(ctx);
                 final dt = DateTime(
-                  pickedDate!.year,
-                  pickedDate!.month,
-                  pickedDate!.day,
-                  pickedTime!.hour,
-                  pickedTime!.minute,
+                  date!.year,
+                  date!.month,
+                  date!.day,
+                  time!.hour,
+                  time!.minute,
                 );
                 setState(() {
-                  _scheduled.add(
+                  _upcoming.add(
                     _Meeting(
-                      title: title,
-                      code: _generateCode(),
+                      title: t,
+                      code: _genCode(),
                       time: dt,
                       participants: 1,
-                      isPast: false,
                     ),
                   );
-                  _scheduled.sort((a, b) => a.time.compareTo(b.time));
+                  _upcoming.sort((a, b) => a.time.compareTo(b.time));
                 });
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
-                    content: Text('Meeting "$title" scheduled for ${_fmt(dt)}'),
+                    content: Text('Scheduled "$t"'),
                     backgroundColor: Colors.green,
                   ),
                 );
@@ -299,122 +531,8 @@ class _MeetingPageState extends State<MeetingPage>
     );
   }
 
-  // ── Participant picker ────────────────────────────────────────────────────
-  Future<List<dynamic>?> _showParticipantPicker() async {
-    final users = <dynamic>[];
-    final selected = <int>{};
-    bool loading = true;
-
-    return showModalBottomSheet<List<dynamic>>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setS) {
-          if (loading) {
-            _userService.getSuggestions(limit: 20).then((list) {
-              setS(() {
-                users.addAll(list);
-                loading = false;
-              });
-            });
-          }
-          return DraggableScrollableSheet(
-            expand: false,
-            initialChildSize: 0.7,
-            maxChildSize: 0.95,
-            builder: (_, sc) => Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    children: [
-                      const Text(
-                        'Add Participants',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const Spacer(),
-                      ElevatedButton(
-                        onPressed: () {
-                          final picked = users
-                              .where((u) => selected.contains(u['id']))
-                              .toList();
-                          Navigator.pop(ctx, picked);
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.deepPurple,
-                          foregroundColor: Colors.white,
-                        ),
-                        child: Text('Start (${selected.length})'),
-                      ),
-                    ],
-                  ),
-                ),
-                const Divider(height: 1),
-                Expanded(
-                  child: loading
-                      ? const Center(child: CircularProgressIndicator())
-                      : ListView.builder(
-                          controller: sc,
-                          itemCount: users.length,
-                          itemBuilder: (_, i) {
-                            final u = users[i];
-                            final uid = u['id'] as int? ?? 0;
-                            final pic = u['profile_image']?.toString() ?? '';
-                            final name =
-                                u['full_name']?.toString() ??
-                                u['username']?.toString() ??
-                                'User';
-                            final isSel = selected.contains(uid);
-                            return CheckboxListTile(
-                              value: isSel,
-                              onChanged: (_) => setS(() {
-                                if (isSel)
-                                  selected.remove(uid);
-                                else
-                                  selected.add(uid);
-                              }),
-                              title: Text(name),
-                              subtitle: Text('@${u['username'] ?? ''}'),
-                              secondary: CircleAvatar(
-                                backgroundImage: pic.isNotEmpty
-                                    ? NetworkImage(pic)
-                                    : null,
-                                backgroundColor: Colors.deepPurple,
-                                child: pic.isEmpty
-                                    ? Text(
-                                        name.isNotEmpty
-                                            ? name[0].toUpperCase()
-                                            : '?',
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                        ),
-                                      )
-                                    : null,
-                              ),
-                              activeColor: Colors.deepPurple,
-                            );
-                          },
-                        ),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
-  String _fmt(DateTime dt) {
-    final days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    final months = [
+  String _fmtDate(DateTime dt) {
+    final ms = [
       'Jan',
       'Feb',
       'Mar',
@@ -430,24 +548,24 @@ class _MeetingPageState extends State<MeetingPage>
     ];
     final h = dt.hour.toString().padLeft(2, '0');
     final m = dt.minute.toString().padLeft(2, '0');
-    return '${days[dt.weekday - 1]} ${months[dt.month - 1]} ${dt.day}, $h:$m';
+    return '${ms[dt.month - 1]} ${dt.day}  $h:$m';
   }
 
-  void _copyCode(String code) {
+  void _copy(String code) {
     Clipboard.setData(ClipboardData(text: code));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Meeting code $code copied!'),
+        content: Text('Code $code copied'),
         duration: const Duration(seconds: 2),
       ),
     );
   }
 
-  // ── Build ─────────────────────────────────────────────────────────────────
+  // ── BUILD ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[50],
+      backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.white,
         elevation: 0,
@@ -467,57 +585,56 @@ class _MeetingPageState extends State<MeetingPage>
           indicatorColor: Colors.deepPurple,
           tabs: const [
             Tab(text: 'Upcoming'),
-            Tab(text: 'Past'),
+            Tab(text: 'History'),
           ],
         ),
       ),
       body: Column(
         children: [
-          // ── Quick action bar ─────────────────────────────────────────
+          // ── Quick buttons ───────────────────────────────────────────────
           Container(
             color: Colors.white,
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
             child: Row(
               children: [
-                _quickBtn(
-                  icon: Icons.video_call_rounded,
-                  label: 'New\nMeeting',
-                  color: Colors.deepPurple,
-                  onTap: _startInstantMeeting,
+                _qbtn(
+                  Icons.video_call_rounded,
+                  'New\nMeeting',
+                  Colors.deepPurple,
+                  _newMeeting,
                 ),
-                const SizedBox(width: 12),
-                _quickBtn(
-                  icon: Icons.link_rounded,
-                  label: 'Join\nMeeting',
-                  color: Colors.blue,
-                  onTap: _showJoinDialog,
+                const SizedBox(width: 10),
+                _qbtn(
+                  Icons.link_rounded,
+                  'Join\nMeeting',
+                  Colors.blue,
+                  () => _joinMeeting(),
                 ),
-                const SizedBox(width: 12),
-                _quickBtn(
-                  icon: Icons.calendar_month_rounded,
-                  label: 'Schedule',
-                  color: Colors.orange,
-                  onTap: _showScheduleDialog,
+                const SizedBox(width: 10),
+                _qbtn(
+                  Icons.calendar_month_rounded,
+                  'Schedule',
+                  Colors.orange,
+                  _scheduleMeeting,
                 ),
-                const SizedBox(width: 12),
-                _quickBtn(
-                  icon: Icons.share_rounded,
-                  label: 'Share\nInvite',
-                  color: Colors.green,
-                  onTap: () {
-                    final code = _generateCode();
-                    _copyCode(code);
-                  },
+                const SizedBox(width: 10),
+                _qbtn(
+                  Icons.content_copy_rounded,
+                  'Copy\nInvite',
+                  Colors.green,
+                  () => _copy(_genCode()),
                 ),
               ],
             ),
           ),
+          if (_creatingMeeting)
+            const LinearProgressIndicator(color: Colors.deepPurple),
           const Divider(height: 1),
-          // ── Tabs ─────────────────────────────────────────────────────
+          // ── Tabs ────────────────────────────────────────────────────────
           Expanded(
             child: TabBarView(
               controller: _tab,
-              children: [_upcomingTab(), _pastTab()],
+              children: [_upcomingTab(), _historyTab()],
             ),
           ),
         ],
@@ -525,82 +642,92 @@ class _MeetingPageState extends State<MeetingPage>
     );
   }
 
-  Widget _quickBtn({
-    required IconData icon,
-    required String label,
-    required Color color,
-    required VoidCallback onTap,
-  }) => Expanded(
-    child: GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 14),
-        decoration: BoxDecoration(
-          color: color.withOpacity(0.09),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: color.withOpacity(0.25)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-              child: Icon(icon, color: Colors.white, size: 22),
+  Widget _qbtn(IconData icon, String label, Color color, VoidCallback onTap) =>
+      Expanded(
+        child: GestureDetector(
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.08),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: color.withOpacity(0.22)),
             ),
-            const SizedBox(height: 8),
-            Text(
-              label,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: color,
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                height: 1.3,
-              ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: color,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(icon, color: Colors.white, size: 20),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  label,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: color,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    height: 1.3,
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
-      ),
-    ),
-  );
+      );
 
   Widget _upcomingTab() {
-    if (_scheduled.isEmpty) {
+    if (_upcoming.isEmpty) {
       return _empty(
         icon: Icons.calendar_today_outlined,
         title: 'No upcoming meetings',
         subtitle: 'Schedule a meeting or start an instant one',
-        actionLabel: 'Schedule Meeting',
-        onAction: _showScheduleDialog,
+        btnLabel: 'New Meeting',
+        onBtn: _newMeeting,
       );
     }
     return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: _scheduled.length,
-      itemBuilder: (_, i) => _meetingCard(_scheduled[i], upcoming: true),
+      padding: const EdgeInsets.all(14),
+      itemCount: _upcoming.length,
+      itemBuilder: (_, i) => _card(
+        _upcoming[i],
+        onDelete: () => setState(() => _upcoming.removeAt(i)),
+      ),
     );
   }
 
-  Widget _pastTab() {
+  Widget _historyTab() {
     if (_past.isEmpty) {
       return _empty(
-        icon: Icons.history,
-        title: 'No past meetings',
-        subtitle: 'Your meeting history will appear here',
-        actionLabel: 'New Meeting',
-        onAction: _startInstantMeeting,
+        icon: Icons.history_rounded,
+        title: 'No meeting history',
+        subtitle: 'Your past meetings will appear here',
+        btnLabel: 'Start a Meeting',
+        onBtn: _newMeeting,
       );
     }
     return ListView.builder(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(14),
       itemCount: _past.length,
-      itemBuilder: (_, i) => _meetingCard(_past[i], upcoming: false),
+      itemBuilder: (_, i) => _card(
+        _past[i],
+        isPast: true,
+        onDelete: () => setState(() => _past.removeAt(i)),
+      ),
     );
   }
 
-  Widget _meetingCard(_Meeting m, {required bool upcoming}) {
+  Widget _card(
+    _Meeting m, {
+    bool isPast = false,
+    required VoidCallback onDelete,
+  }) {
     return Container(
       margin: const EdgeInsets.only(bottom: 14),
       decoration: BoxDecoration(
@@ -608,38 +735,31 @@ class _MeetingPageState extends State<MeetingPage>
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.06),
-            blurRadius: 10,
-            offset: const Offset(0, 3),
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
           ),
         ],
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header
-          Container(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-            decoration: BoxDecoration(
-              color: upcoming
-                  ? Colors.deepPurple.withOpacity(0.06)
-                  : Colors.grey.withOpacity(0.04),
-              borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(16),
-              ),
-            ),
-            child: Row(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
                 Container(
-                  width: 44,
-                  height: 44,
+                  width: 46,
+                  height: 46,
                   decoration: BoxDecoration(
-                    color: upcoming ? Colors.deepPurple : Colors.grey[400],
+                    color: isPast
+                        ? Colors.grey.withOpacity(0.15)
+                        : Colors.deepPurple.withOpacity(0.12),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Icon(
+                  child: Icon(
                     Icons.video_call_rounded,
-                    color: Colors.white,
+                    color: isPast ? Colors.grey : Colors.deepPurple,
                     size: 24,
                   ),
                 ),
@@ -655,7 +775,7 @@ class _MeetingPageState extends State<MeetingPage>
                           fontSize: 15,
                         ),
                       ),
-                      const SizedBox(height: 2),
+                      const SizedBox(height: 3),
                       Row(
                         children: [
                           Icon(
@@ -665,7 +785,7 @@ class _MeetingPageState extends State<MeetingPage>
                           ),
                           const SizedBox(width: 4),
                           Text(
-                            _fmt(m.time),
+                            _fmtDate(m.time),
                             style: TextStyle(
                               color: Colors.grey[500],
                               fontSize: 12,
@@ -676,18 +796,18 @@ class _MeetingPageState extends State<MeetingPage>
                     ],
                   ),
                 ),
-                if (upcoming)
+                if (!isPast)
                   Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
+                      horizontal: 9,
                       vertical: 4,
                     ),
                     decoration: BoxDecoration(
-                      color: Colors.green.withOpacity(0.12),
+                      color: Colors.green.withOpacity(0.1),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: const Text(
-                      'Upcoming',
+                      'Scheduled',
                       style: TextStyle(
                         color: Colors.green,
                         fontSize: 11,
@@ -697,127 +817,77 @@ class _MeetingPageState extends State<MeetingPage>
                   ),
               ],
             ),
-          ),
-          // Body
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
-            child: Row(
-              children: [
-                // Meeting code
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Meeting Code',
-                        style: TextStyle(color: Colors.grey[500], fontSize: 11),
-                      ),
-                      const SizedBox(height: 3),
-                      Row(
-                        children: [
-                          Text(
-                            m.code,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 16,
-                              letterSpacing: 2,
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          GestureDetector(
-                            onTap: () => _copyCode(m.code),
-                            child: Icon(
-                              Icons.copy,
-                              size: 16,
-                              color: Colors.grey[500],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                // Participants
-                Row(
-                  children: [
-                    Icon(
-                      Icons.people_outline,
-                      size: 16,
-                      color: Colors.grey[500],
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      '${m.participants}',
-                      style: TextStyle(color: Colors.grey[600]),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          // Actions
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            child: Row(
-              children: [
-                if (upcoming) ...[
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: () => _joinMeeting(m.code),
-                      icon: const Icon(Icons.video_call, size: 18),
-                      label: const Text('Start / Join'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.deepPurple,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
-                    ),
-                  ),
+            const SizedBox(height: 12),
+            // Code row
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.grey[100],
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.link, size: 16, color: Colors.grey),
                   const SizedBox(width: 8),
-                  OutlinedButton.icon(
-                    onPressed: () => _copyCode(m.code),
-                    icon: const Icon(Icons.share, size: 16),
-                    label: const Text('Share'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.deepPurple,
-                      side: const BorderSide(color: Colors.deepPurple),
+                  Text(
+                    m.code,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                      letterSpacing: 2,
+                    ),
+                  ),
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: () => _copy(m.code),
+                    child: const Icon(
+                      Icons.copy,
+                      size: 16,
+                      color: Colors.deepPurple,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            // Action buttons
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () => _joinMeeting(m.code),
+                    icon: const Icon(Icons.videocam, size: 18),
+                    label: Text(isPast ? 'Start Again' : 'Start / Join'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.deepPurple,
+                      foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(10),
                       ),
                     ),
                   ),
-                  const SizedBox(width: 4),
-                  IconButton(
-                    icon: const Icon(Icons.delete_outline, color: Colors.red),
-                    onPressed: () => setState(() => _scheduled.remove(m)),
-                  ),
-                ] else ...[
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => _joinMeeting(m.code),
-                      icon: const Icon(Icons.replay_rounded, size: 16),
-                      label: const Text('Start Again'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.deepPurple,
-                        side: const BorderSide(color: Colors.deepPurple),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: () => _copy(m.code),
+                  icon: const Icon(Icons.share, size: 16),
+                  label: const Text('Share'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.deepPurple,
+                    side: const BorderSide(color: Colors.deepPurple),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    icon: const Icon(Icons.delete_outline, color: Colors.red),
-                    onPressed: () => setState(() => _past.remove(m)),
-                  ),
-                ],
+                ),
+                IconButton(
+                  onPressed: onDelete,
+                  icon: const Icon(Icons.delete_outline, color: Colors.red),
+                ),
               ],
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -826,8 +896,8 @@ class _MeetingPageState extends State<MeetingPage>
     required IconData icon,
     required String title,
     required String subtitle,
-    required String actionLabel,
-    required VoidCallback onAction,
+    required String btnLabel,
+    required VoidCallback onBtn,
   }) => Center(
     child: Padding(
       padding: const EdgeInsets.all(32),
@@ -841,7 +911,7 @@ class _MeetingPageState extends State<MeetingPage>
               color: Colors.deepPurple.withOpacity(0.08),
               shape: BoxShape.circle,
             ),
-            child: Icon(icon, size: 40, color: Colors.deepPurple),
+            child: Icon(icon, size: 38, color: Colors.deepPurple),
           ),
           const SizedBox(height: 20),
           Text(
@@ -856,9 +926,9 @@ class _MeetingPageState extends State<MeetingPage>
           ),
           const SizedBox(height: 24),
           ElevatedButton.icon(
-            onPressed: onAction,
+            onPressed: onBtn,
             icon: const Icon(Icons.add),
-            label: Text(actionLabel),
+            label: Text(btnLabel),
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.deepPurple,
               foregroundColor: Colors.white,
@@ -880,13 +950,11 @@ class _Meeting {
   final String code;
   final DateTime time;
   final int participants;
-  final bool isPast;
 
   const _Meeting({
     required this.title,
     required this.code,
     required this.time,
-    required this.participants,
-    required this.isPast,
+    this.participants = 1,
   });
 }
