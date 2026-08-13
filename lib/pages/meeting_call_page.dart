@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:http/http.dart' as http;
 import '../services/websocket_service.dart';
+import '../services/api_client.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MeetingCallPage — real room-based video meeting
@@ -116,6 +119,43 @@ class _MeetingCallPageState extends State<MeetingCallPage>
   void _tryJoin() {
     _ws.meetingJoin(widget.meetingCode);
     setState(() => _status = 'Looking for host...');
+    // Also poll via REST as fallback
+    _pollForHost();
+  }
+
+  Future<void> _pollForHost() async {
+    if (!mounted) return;
+    try {
+      final url = Uri.parse(
+        '${ApiClient.serverBase}/meeting/${widget.meetingCode}',
+      );
+      final resp = await http.get(url).timeout(const Duration(seconds: 5));
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (data['status'] == 'found') {
+        final hostId = (data['host_id'] as num?)?.toInt();
+        final hostName = data['host_name']?.toString() ?? 'Host';
+        if (hostId == null || !mounted) return;
+        _joinRetry?.cancel();
+        debugPrint('Meeting REST: found host=$hostId name=$hostName');
+        if (!_participants.containsKey(hostId)) {
+          await _createParticipant(hostId, name: hostName, sendOffer: false);
+        }
+        if (mounted) setState(() => _status = 'Connecting to host...');
+        return;
+      }
+    } catch (e) {
+      debugPrint('Meeting poll: $e');
+    }
+    // Not found — retry
+    _joinAttempts++;
+    if (mounted)
+      setState(() => _status = 'Waiting for host... ($_joinAttempts)');
+    if (_joinAttempts < 30 && mounted) {
+      _joinRetry?.cancel();
+      _joinRetry = Timer(const Duration(seconds: 2), _pollForHost);
+    } else if (mounted) {
+      setState(() => _status = 'Host not found. Check the meeting code.');
+    }
   }
 
   Future<void> _getMedia() async {

@@ -140,6 +140,31 @@ func main() {
 		c.JSON(200, gin.H{"message": "Data seeded"})
 	})
 
+	// ─── Meeting room REST lookup ────────────────────────────────────────────
+	router.GET("/meeting/:code", func(c *gin.Context) {
+		code := c.Param("code")
+		hub := websocket.GetHub()
+		if hub == nil {
+			c.JSON(503, gin.H{"status": "no_host"})
+			return
+		}
+		hub.MeetingMu.RLock()
+		hostID, exists := hub.MeetingRooms[code]
+		hub.MeetingMu.RUnlock()
+		if !exists || hostID == 0 {
+			c.JSON(404, gin.H{"status": "no_host", "code": code})
+			return
+		}
+		var host models.User
+		db.First(&host, hostID)
+		c.JSON(200, gin.H{
+			"status":       "found",
+			"host_id":      hostID,
+			"host_name":    host.FullName,
+			"host_avatar":  host.ProfileImage,
+		})
+	})
+
 	// Serve uploaded files
 	router.Static("/uploads", "./uploads")
 

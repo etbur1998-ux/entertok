@@ -214,9 +214,9 @@ type Hub struct {
 	webrtcWaiting []uint
 	webrtcPairs   map[uint]uint
 	webrtcMu      sync.RWMutex
-	// Meeting rooms: code → host user ID
-	meetingRooms map[string]uint
-	meetingMu    sync.RWMutex
+	// Meeting rooms: code → host user ID (public for REST access)
+	MeetingRooms map[string]uint
+	MeetingMu    sync.RWMutex
 }
 
 func NewHub(db *gorm.DB) *Hub {
@@ -228,7 +228,7 @@ func NewHub(db *gorm.DB) *Hub {
 		db:            db,
 		webrtcWaiting: []uint{},
 		webrtcPairs:   make(map[uint]uint),
-		meetingRooms:  make(map[string]uint),
+		MeetingRooms:  make(map[string]uint),
 	}
 }
 
@@ -579,9 +579,9 @@ func (h *Hub) handleMessage(client *Client, msgType string, payload json.RawMess
 		// Host registers their presence in a room
 		var p struct { Code string `json:"code"` }
 		if err := json.Unmarshal(payload, &p); err != nil { return }
-		h.meetingMu.Lock()
-		h.meetingRooms[p.Code] = client.user.ID
-		h.meetingMu.Unlock()
+		h.MeetingMu.Lock()
+		h.MeetingRooms[p.Code] = client.user.ID
+		h.MeetingMu.Unlock()
 		log.Printf("🏠 Meeting host: user=%d code=%s", client.user.ID, p.Code)
 		// Ack
 		ack, _ := json.Marshal(map[string]interface{}{"code": p.Code, "status": "hosting"})
@@ -591,9 +591,9 @@ func (h *Hub) handleMessage(client *Client, msgType string, payload json.RawMess
 		// Joiner asks: who is the host for this code?
 		var p struct { Code string `json:"code"` }
 		if err := json.Unmarshal(payload, &p); err != nil { return }
-		h.meetingMu.RLock()
-		hostID, exists := h.meetingRooms[p.Code]
-		h.meetingMu.RUnlock()
+		h.MeetingMu.RLock()
+		hostID, exists := h.MeetingRooms[p.Code]
+		h.MeetingMu.RUnlock()
 		if !exists || hostID == 0 {
 			// No host yet — tell joiner to wait
 			noHost, _ := json.Marshal(map[string]interface{}{"code": p.Code, "status": "no_host"})
@@ -625,11 +625,11 @@ func (h *Hub) handleMessage(client *Client, msgType string, payload json.RawMess
 		// Host/joiner leaving — clean up room
 		var p struct { Code string `json:"code"` }
 		if err := json.Unmarshal(payload, &p); err != nil { return }
-		h.meetingMu.Lock()
-		if h.meetingRooms[p.Code] == client.user.ID {
-			delete(h.meetingRooms, p.Code)
+		h.MeetingMu.Lock()
+		if h.MeetingRooms[p.Code] == client.user.ID {
+			delete(h.MeetingRooms, p.Code)
 		}
-		h.meetingMu.Unlock()
+		h.MeetingMu.Unlock()
 
 	// ── WebRTC Random Matching ────────────────────────────────────────────
 	case "webrtc_find_peer":
