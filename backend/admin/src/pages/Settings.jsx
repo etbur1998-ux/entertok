@@ -187,13 +187,13 @@ export default function Settings() {
       {/* API Info */}
       <Section title="API Configuration" icon={Database}>
         <Row label="Backend URL" description="Go API base URL">
-          <code style={{ background:'var(--surface2)', padding:'4px 8px', borderRadius:4, fontSize:12 }}>http://127.0.0.1:8080</code>
+          <code style={{ background:'var(--surface2)', padding:'4px 8px', borderRadius:4, fontSize:12 }}>http://192.168.1.3:8082</code>
         </Row>
         <Row label="API Version" description="Current API version">
           <code style={{ background:'var(--surface2)', padding:'4px 8px', borderRadius:4, fontSize:12 }}>/api/v1</code>
         </Row>
         <Row label="WebSocket" description="Real-time connection endpoint">
-          <code style={{ background:'var(--surface2)', padding:'4px 8px', borderRadius:4, fontSize:12 }}>ws://127.0.0.1:8080/ws</code>
+          <code style={{ background:'var(--surface2)', padding:'4px 8px', borderRadius:4, fontSize:12 }}>ws://192.168.1.3:8082/ws</code>
         </Row>
         <Row label="Database" description="Database engine">
           <span className="badge badge-green">SQLite</span>
