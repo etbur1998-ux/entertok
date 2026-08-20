@@ -8,12 +8,12 @@ export default defineConfig({
     // SPA fallback — all unknown routes → index.html
     historyApiFallback: true,
     proxy: {
-      '/api':     { target: 'http://192.168.1.3:8082', changeOrigin: true },
-      '/uploads': { target: 'http://192.168.1.3:8082', changeOrigin: true },
-      '/health':  { target: 'http://192.168.1.3:8082', changeOrigin: true },
-      '/debug':   { target: 'http://192.168.1.3:8082', changeOrigin: true },
-      '/ws':      { target: 'http://192.168.1.3:8082', changeOrigin: true, ws: true },
-      '/meeting': { target: 'http://192.168.1.3:8082', changeOrigin: true },
+      '/api':     { target: 'http://192.168.1.7:8082', changeOrigin: true },
+      '/uploads': { target: 'http://192.168.1.7:8082', changeOrigin: true },
+      '/health':  { target: 'http://192.168.1.7:8082', changeOrigin: true },
+      '/debug':   { target: 'http://192.168.1.7:8082', changeOrigin: true },
+      '/ws':      { target: 'http://192.168.1.7:8082', changeOrigin: true, ws: true },
+      '/meeting': { target: 'http://192.168.1.7:8082', changeOrigin: true },
     }
   },
   build: {
