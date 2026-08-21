@@ -3,10 +3,8 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 class ApiClient {
-  // ── Change this to your machine's IP when testing on a real device ──
-  // For emulator/desktop use 127.0.0.1
-  // For physical phone use your PC's LAN IP e.g. 192.168.1.x
-  static const String serverHost = '127.0.0.1';
+  // ── Home server — accessible from all devices on the LAN ──────────────────
+  static const String serverHost = '192.168.1.7';
   static const String serverPort = '8082';
   static const String serverBase = 'http://$serverHost:$serverPort';
   static const String baseUrl = '$serverBase/api/v1';
